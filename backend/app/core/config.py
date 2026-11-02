@@ -1,4 +1,4 @@
-﻿from functools import lru_cache
+from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     debug: bool = False
     api_prefix: str = "/api/v1"
     database_url: str = "postgresql+psycopg://opsmind:opsmind@localhost:5433/opsmind"
+    app_database_url: str = "postgresql+psycopg://opsmind_app:opsmind_app@localhost:5433/opsmind"
     redis_url: str = "redis://localhost:6379/0"
 
 
