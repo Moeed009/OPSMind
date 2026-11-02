@@ -15,6 +15,7 @@ concurrency:
 jobs:
   backend:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: backend
@@ -44,7 +45,9 @@ jobs:
     env:
       ENVIRONMENT: development
       DATABASE_URL: postgresql+psycopg://opsmind:opsmind@localhost:5432/opsmind
+      APP_DATABASE_URL: postgresql+psycopg://opsmind_app:opsmind_app@localhost:5432/opsmind
       REDIS_URL: redis://localhost:6379/0
+      PGPASSWORD: opsmind
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +63,14 @@ jobs:
       - name: Lint
         run: uv run ruff check .
 
+      - name: Create application database role
+        run: psql "postgresql://opsmind@localhost:5432/opsmind" -v ON_ERROR_STOP=1 -f ../docker/postgres/init/01-roles.sql
+
       - name: Apply migrations
         run: uv run alembic upgrade head
 
+      - name: Check migrations match models
+        run: uv run alembic check
+
       - name: Test
-        run: uv run pytest
+        run: uv run pytest -q
