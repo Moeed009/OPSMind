@@ -17,7 +17,12 @@ class EvalResult(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
         tenant_fk("workflow_version_id", "workflow_versions"),
         CheckConstraint("score >= 0 AND score <= 1", name="score_range"),
         CheckConstraint("cost_usd >= 0", name="cost_non_negative"),
-        Index("ix_eval_results_tenant_id_eval_set_id_created_at", "tenant_id", "eval_set_id", "created_at"),
+               Index(
+            "ix_eval_results_tenant_id_eval_set_id_created_at",
+            "tenant_id",
+            "eval_set_id",
+            "created_at",
+        ),
     )
 
     eval_set_id: Mapped[uuid.UUID] = mapped_column(Uuid)

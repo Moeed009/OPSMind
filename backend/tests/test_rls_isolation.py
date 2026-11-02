@@ -123,7 +123,6 @@ def seed(owner_engine):
         conn.execute(text("delete from users where id = any(:ids)"), {"ids": users})
 
 
-# --- Fail-closed: tenant set nahi to koi row nahi ---------------------------------
 
 
 @pytest.mark.parametrize("table", ALL_TABLES)
@@ -132,7 +131,6 @@ def test_no_tenant_set_returns_zero_rows(app_engine, seed, table):
         assert conn.scalar(text(f"select count(*) from {table}")) == 0
 
 
-# --- Tenant A sirf apna data dekhta hai -------------------------------------------
 
 
 def test_tenant_a_sees_only_its_workflows(app_engine, seed):
@@ -170,8 +168,6 @@ def test_user_context_sees_self_and_own_tenants_only(app_engine, seed):
     assert [m[0] for m in memberships] == [seed["tenant_b"]]
     assert workflows == 0
 
-
-# --- Cross-tenant likhna band -----------------------------------------------------
 
 
 def test_cross_tenant_insert_is_rejected(app_engine, seed):

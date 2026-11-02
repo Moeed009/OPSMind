@@ -30,7 +30,12 @@ class UsageRecord(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
         tenant_fk("workflow_id", "workflows"),
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
         CheckConstraint("cost_usd >= 0", name="cost_non_negative"),
-        Index("ix_usage_records_tenant_id_metric_occurred_at", "tenant_id", "metric", "occurred_at"),
+                Index(
+            "ix_usage_records_tenant_id_metric_occurred_at",
+            "tenant_id",
+            "metric",
+            "occurred_at",
+        ),
         Index("ix_usage_records_tenant_id_run_id", "tenant_id", "run_id"),
     )
 

@@ -1,4 +1,4 @@
-from functools import lru_cache
+﻿from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://opsmind:opsmind@localhost:5433/opsmind"
     app_database_url: str = "postgresql+psycopg://opsmind_app:opsmind_app@localhost:5433/opsmind"
     redis_url: str = "redis://localhost:6379/0"
+
+   
+    supabase_url: str = ""
+    supabase_jwt_secret: str = ""
+    supabase_jwt_audience: str = "authenticated"
 
 
 @lru_cache
