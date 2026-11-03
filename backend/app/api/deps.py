@@ -3,11 +3,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.security import AuthError, AuthUser, decode_token
 from app.db.enums import Role
 from app.db.models import Membership, User
@@ -26,12 +27,19 @@ def _unauthorized() -> HTTPException:
 
 
 def get_current_user(
+    request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
 ) -> AuthUser:
-    if credentials is None:
+    settings = get_settings()
+    token = (
+        credentials.credentials
+        if credentials
+        else request.cookies.get(settings.auth_access_cookie_name)
+    )
+    if not token:
         raise _unauthorized()
     try:
-        return decode_token(credentials.credentials)
+        return decode_token(token)
     except AuthError:
         raise _unauthorized() from None
 
@@ -40,7 +48,7 @@ CurrentUser = Annotated[AuthUser, Depends(get_current_user)]
 
 
 def get_user_db(user: CurrentUser) -> Iterator[Session]:
-   
+
     with get_session_factory()() as session, session.begin():
         set_rls_context(session, user_id=user.id)
         yield session
@@ -71,14 +79,12 @@ def get_tenant_context(
             status.HTTP_400_BAD_REQUEST, "X-Tenant-ID must be a valid UUID"
         ) from None
 
-   
     row = db.execute(
         select(Membership.role, User.is_active)
         .join(User, User.id == Membership.user_id)
         .where(Membership.user_id == user.id, Membership.tenant_id == tenant_id)
     ).one_or_none()
     if row is None or not row.is_active:
-        
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No access to this tenant")
 
     set_rls_context(db, tenant_id=tenant_id)

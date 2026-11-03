@@ -9,8 +9,13 @@ from app.core.config import get_settings
 
 @lru_cache
 def get_engine() -> Engine:
+    database_url = get_settings().app_database_url
+    if not database_url:
+        raise RuntimeError(
+            "APP_DATABASE_URL must point to the Supabase PostgreSQL app-role connection."
+        )
     return create_engine(
-        get_settings().app_database_url,
+        database_url,
         pool_pre_ping=True,
         pool_size=5,
         max_overflow=5,

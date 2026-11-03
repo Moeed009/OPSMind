@@ -36,6 +36,6 @@ def test_all_section_8_tables_have_models():
         "tenants", "users", "memberships", "connections", "events", "workflows",
         "workflow_versions", "runs", "run_steps", "action_logs", "review_tasks",
         "documents", "doc_chunks", "eval_sets", "eval_results", "guardrail_events",
-        "usage_records", "subscriptions", "api_keys", "audit_logs",
+        "usage_records", "subscriptions", "api_keys", "audit_logs", "invitations",
     }
     assert set(Base.metadata.tables) == expected

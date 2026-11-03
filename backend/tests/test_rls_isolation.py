@@ -23,7 +23,10 @@ ALL_TABLES = [
 
 @pytest.fixture(scope="module")
 def owner_engine():
-    engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+    database_url = get_settings().database_url
+    if not database_url:
+        pytest.skip("Supabase DATABASE_URL is not configured")
+    engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with engine.connect() as conn:
             conn.execute(text("select 1"))
@@ -35,8 +38,11 @@ def owner_engine():
 
 @pytest.fixture(scope="module")
 def app_engine():
+    app_database_url = get_settings().app_database_url
+    if not app_database_url:
+        pytest.skip("Supabase APP_DATABASE_URL is not configured")
     engine = create_engine(
-        get_settings().app_database_url,
+        app_database_url,
         pool_pre_ping=True,
         connect_args={"prepare_threshold": None},
     )

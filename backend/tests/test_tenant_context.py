@@ -51,7 +51,10 @@ client = TestClient(app)
 
 @pytest.fixture(scope="module")
 def owner_engine():
-    engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+    database_url = get_settings().database_url
+    if not database_url:
+        pytest.skip("Supabase DATABASE_URL is not configured")
+    engine = create_engine(database_url, pool_pre_ping=True)
     try:
         with engine.connect() as conn:
             conn.execute(text("select 1"))

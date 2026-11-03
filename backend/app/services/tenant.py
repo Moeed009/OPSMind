@@ -36,7 +36,7 @@ def _is_slug_conflict(exc: IntegrityError) -> bool:
     return getattr(diag, "constraint_name", None) == "uq_tenants_slug"
 
 
-def _ensure_user(db: Session, user: AuthUser) -> User:
+def ensure_user(db: Session, user: AuthUser) -> User:
     
     if user.email:
         db.execute(
@@ -75,7 +75,7 @@ def _insert_tenant(db: Session, tenant_id: uuid.UUID, payload: TenantCreate) -> 
 
 def create_tenant(db: Session, user: AuthUser, payload: TenantCreate) -> TenantOut:
     
-    row = _ensure_user(db, user)
+    row = ensure_user(db, user)
     if not row.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User is inactive")
 
