@@ -8,7 +8,7 @@ from app.schemas.tenant import MeOut, TenantOut
 router = APIRouter(tags=["me"])
 
 
-@router.get("/current-user", response_model=MeOut)
+@router.get("/me", response_model=MeOut)
 def read_me(user: CurrentUser, db: UserDb) -> MeOut:
     
     row = db.scalar(select(User).where(User.id == user.id))
