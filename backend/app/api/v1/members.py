@@ -11,13 +11,11 @@ from app.services import member as member_service
 
 router = APIRouter(prefix="/members", tags=["members"])
 
-
 @router.get("", response_model=list[MemberOut])
 def list_company_members(
     tc: Annotated[TenantContext, Depends(require_permission(Permission.MEMBERS_READ))],
 ) -> list[MemberOut]:
     return member_service.list_members(tc.db, tc.tenant_id)
-
 
 @router.patch("/{user_id}", response_model=MemberOut)
 def change_member_role(
@@ -34,10 +32,9 @@ def change_member_role(
         new_role=payload.role,
     )
 
-
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_company_member(user_id: uuid.UUID, tc: TenantCtx) -> Response:
-    """Member hatana (Owner/Admin), ya khud chhodna (koi bhi member, user_id = apni id)."""
+    
     member_service.remove_member(
         tc.db,
         tenant_id=tc.tenant_id,

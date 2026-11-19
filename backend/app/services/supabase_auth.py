@@ -12,7 +12,6 @@ class SupabaseAuthError(Exception):
         self.message = message
         super().__init__(message)
 
-
 class SupabaseAuthService:
     def __init__(self) -> None:
         settings = get_settings()
@@ -95,6 +94,27 @@ class SupabaseAuthService:
             query="?grant_type=refresh_token",
             payload={"refresh_token": refresh_token},
         )
+
+    def get_google_auth_url(self, redirect_to: str) -> str:
+        """Constructs the Supabase Auth Google OAuth authorization URL."""
+        params = {
+            "provider": "google",
+            "redirect_to": redirect_to,
+        }
+        return f"{self.base_url}/authorize?{urlencode(params)}"
+
+    def exchange_code(self, code: str) -> dict[str, Any]:
+        
+        return self._request(
+            "POST",
+            "token",
+            query="?grant_type=pkce",
+            payload={"auth_code": code},
+        )
+
+    def get_user_info(self, access_token: str) -> dict[str, Any]:
+        
+        return self._request("GET", "user", access_token=access_token)
 
     def request_password_reset(self, email: str) -> dict[str, Any]:
         redirect_url = get_settings().supabase_password_reset_redirect_url

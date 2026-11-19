@@ -73,7 +73,7 @@ def signup(uid, email, name, region="eu", slug=None):
     body = {"name": name, "region": region}
     if slug:
         body["slug"] = slug
-    return client.post("/api/v1/tenants", json=body, headers=hdr(uid, email))
+    return client.post("/tenants", json=body, headers=hdr(uid, email))
 
 
 def test_signup_creates_everything(owner_engine):
@@ -111,7 +111,7 @@ def test_signup_creates_everything(owner_engine):
 def test_me_lists_own_company_after_signup():
     uid, email = new_user()
     created = signup(uid, email, f"Beta {uid.hex[:8]}").json()
-    r = client.get("/api/v1/me", headers=hdr(uid, email))
+    r = client.get("/current_user", headers=hdr(uid, email))
     assert r.status_code == 200
     body = r.json()
     assert body["email"] == email
@@ -121,7 +121,7 @@ def test_me_lists_own_company_after_signup():
 
 def test_me_before_signup_returns_empty_list():
     uid, email = new_user()
-    r = client.get("/api/v1/me", headers=hdr(uid, email))
+    r = client.get("/current_user", headers=hdr(uid, email))
     assert r.status_code == 200
     assert r.json()["tenants"] == []
     assert r.json()["email"] == email
@@ -131,20 +131,19 @@ def test_me_never_shows_other_users_companies():
     (u1, e1), (u2, e2) = new_user(), new_user()
     t1 = signup(u1, e1, f"One {u1.hex[:8]}").json()["id"]
     t2 = signup(u2, e2, f"Two {u2.hex[:8]}").json()["id"]
-    ids1 = [t["id"] for t in client.get("/api/v1/me", headers=hdr(u1, e1)).json()["tenants"]]
-    ids2 = [t["id"] for t in client.get("/api/v1/me", headers=hdr(u2, e2)).json()["tenants"]]
+    ids1 = [t["id"] for t in client.get("/current_user", headers=hdr(u1, e1)).json()["tenants"]]
+    ids2 = [t["id"] for t in client.get("/current_user", headers=hdr(u2, e2)).json()["tenants"]]
     assert ids1 == [t1]
     assert ids2 == [t2]
 
 
-def test_company_limit_is_three():
+def test_company_limit_is_one():
     uid, email = new_user()
-    for i in range(3):
-        assert signup(uid, email, f"Co{i} {uid.hex[:8]}").status_code == 201
-    r = signup(uid, email, f"Co3 {uid.hex[:8]}")
+    assert signup(uid, email, f"Co1 {uid.hex[:8]}").status_code == 201
+    r = signup(uid, email, f"Co2 {uid.hex[:8]}")
     assert r.status_code == 409
     assert "limit" in r.json()["detail"].lower()
-    assert len(client.get("/api/v1/me", headers=hdr(uid, email)).json()["tenants"]) == 3
+    assert len(client.get("/current_user", headers=hdr(uid, email)).json()["tenants"]) == 1
 
 
 def test_explicit_slug_conflict_is_409_and_rolls_back(owner_engine):
@@ -190,7 +189,7 @@ def test_inactive_user_is_403(owner_engine):
             {"i": uid, "e": email},
         )
     assert signup(uid, email, "Nope").status_code == 403
-    assert client.get("/api/v1/me", headers=hdr(uid, email)).status_code == 403
+    assert client.get("/current_user", headers=hdr(uid, email)).status_code == 403
 
 
 def test_token_without_email_is_400_for_new_user():
@@ -209,11 +208,11 @@ def test_token_without_email_is_400_for_new_user():
 )
 def test_invalid_payload_is_422(body):
     uid, email = new_user()
-    r = client.post("/api/v1/tenants", json=body, headers=hdr(uid, email))
+    r = client.post("/tenants", json=body, headers=hdr(uid, email))
     assert r.status_code == 422
 
 
 def test_unauthenticated_is_401():
-    r = client.post("/api/v1/tenants", json={"name": "Valid Name", "region": "eu"})
+    r = client.post("/tenants", json={"name": "Valid Name", "region": "eu"})
     assert r.status_code == 401
-    assert client.get("/api/v1/me").status_code == 401
+    assert client.get("/current_user").status_code == 401

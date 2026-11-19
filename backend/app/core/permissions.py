@@ -26,7 +26,6 @@ class Permission(StrEnum):
     API_KEYS_MANAGE = "api_keys.manage"
     AUDIT_READ = "audit.read"
 
-
 _OWNER = frozenset({Role.OWNER})
 _ADMINS = frozenset({Role.OWNER, Role.ADMIN})
 _BUILDERS = frozenset({Role.OWNER, Role.ADMIN, Role.BUILDER})
@@ -56,7 +55,6 @@ PERMISSION_ROLES: dict[Permission, frozenset[Role]] = {
     Permission.API_KEYS_MANAGE: _ADMINS,
     Permission.AUDIT_READ: _ADMINS,
 }
-
 
 def has_permission(role: Role, permission: Permission) -> bool:
     return role in PERMISSION_ROLES[permission]

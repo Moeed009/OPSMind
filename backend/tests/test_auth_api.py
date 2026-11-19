@@ -54,7 +54,7 @@ def configure_auth_mocks(monkeypatch):
 def test_signup_creates_session_cookies(monkeypatch):
     configure_auth_mocks(monkeypatch)
     response = client.post(
-        "/api/v1/auth/signup",
+        "/auth/signup",
         json={
             "email": "new.user@example.com",
             "password": "StrongPassword123",
@@ -72,7 +72,7 @@ def test_signup_creates_session_cookies(monkeypatch):
 
 def test_signup_rejects_weak_password():
     response = client.post(
-        "/api/v1/auth/signup",
+        "/auth/signup",
         json={"email": "new.user@example.com", "password": "short"},
     )
     assert response.status_code == 422
@@ -81,7 +81,7 @@ def test_signup_rejects_weak_password():
 def test_login_creates_session_cookies(monkeypatch):
     configure_auth_mocks(monkeypatch)
     response = client.post(
-        "/api/v1/auth/login",
+        "/auth/login",
         json={"email": "test.user@example.com", "password": "StrongPassword123"},
     )
 
@@ -94,7 +94,7 @@ def test_login_creates_session_cookies(monkeypatch):
 def test_password_reset_request_does_not_disclose_account_existence(monkeypatch):
     configure_auth_mocks(monkeypatch)
     response = client.post(
-        "/api/v1/auth/password/reset-request",
+        "/auth/password/reset-request",
         json={"email": "unknown@example.com"},
     )
 

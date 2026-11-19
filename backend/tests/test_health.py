@@ -8,7 +8,7 @@ client = TestClient(app)
 
 
 def test_health_returns_ok():
-    response = client.get("/api/v1/health")
+    response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {
         "status": "ok",
@@ -20,7 +20,7 @@ def test_health_returns_ok():
 def test_ready_when_dependencies_up(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(health, "check_database", lambda: True)
     monkeypatch.setattr(health, "check_redis", lambda: True)
-    response = client.get("/api/v1/health/ready")
+    response = client.get("/health/ready")
     assert response.status_code == 200
     assert response.json() == {"status": "ready", "database": True, "redis": True}
 
@@ -28,6 +28,6 @@ def test_ready_when_dependencies_up(monkeypatch: pytest.MonkeyPatch):
 def test_ready_returns_503_when_database_down(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(health, "check_database", lambda: False)
     monkeypatch.setattr(health, "check_redis", lambda: True)
-    response = client.get("/api/v1/health/ready")
+    response = client.get("/health/ready")
     assert response.status_code == 503
     assert response.json()["status"] == "degraded"
