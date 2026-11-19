@@ -13,7 +13,6 @@ class UUIDPrimaryKeyMixin:
         server_default=text("gen_random_uuid()"),
     )
 
-
 class TimestampMixin:
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -24,7 +23,6 @@ class TimestampMixin:
         onupdate=func.now(),
         nullable=False,
     )
-
 
 class TenantScopedMixin:
     @declared_attr

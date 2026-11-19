@@ -41,7 +41,7 @@ class ActionLog(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
 
     run_id: Mapped[uuid.UUID] = mapped_column(Uuid)
     run_step_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
-    connection_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     action_type: Mapped[str] = mapped_column(String(100))
     idempotency_key: Mapped[str] = mapped_column(String(255))
     status: Mapped[ActionStatus] = mapped_column(

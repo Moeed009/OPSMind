@@ -64,6 +64,7 @@ class WorkflowVersion(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Ba
     trigger_event_type: Mapped[str | None] = mapped_column(String(100))
     eval_score: Mapped[Decimal | None] = mapped_column(Numeric(5, 4))
     change_note: Mapped[str | None] = mapped_column(Text)
+    pause_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("users.id", ondelete="SET NULL")
     )

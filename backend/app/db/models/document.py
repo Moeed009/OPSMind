@@ -27,11 +27,17 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "connection_id", "external_id"),
         tenant_fk("connection_id", "connections"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
         CheckConstraint("size_bytes IS NULL OR size_bytes >= 0", name="size_non_negative"),
         Index("ix_documents_tenant_id_status", "tenant_id", "status"),
+        Index("ix_documents_tenant_scope_dept", "tenant_id", "scope", "department_id"),
     )
 
     connection_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    scope: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="company_shared", server_default="company_shared"
+    )
     source: Mapped[DocumentSource] = mapped_column(enum_column(DocumentSource, "document_source"))
     external_id: Mapped[str | None] = mapped_column(String(255))
     title: Mapped[str] = mapped_column(String(500))
