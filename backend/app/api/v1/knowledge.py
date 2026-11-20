@@ -74,10 +74,10 @@ def list_knowledge_documents(
     tc: Annotated[TenantContext, Depends(require_permission(Permission.KNOWLEDGE_READ))],
     department_id: Annotated[uuid.UUID | None, Query()] = None,
 ) -> list[KnowledgeDocumentOut]:
+    from app.services import department as department_service
+
     stmt = select(Document).where(Document.tenant_id == tc.tenant_id)
     if department_id is not None:
-        from app.services import department as department_service
-
         department_service.check_department_access(
             tc.db,
             tenant_id=tc.tenant_id,
@@ -89,6 +89,19 @@ def list_knowledge_documents(
         stmt = stmt.where(
             or_(Document.department_id == department_id, Document.scope == "company_shared")
         )
+    elif not department_service.is_company_admin(tc.role):
+        assigned_ids = department_service.get_assigned_department_ids(
+            tc.db, tc.tenant_id, tc.user.id
+        )
+        if assigned_ids:
+            stmt = stmt.where(
+                or_(
+                    Document.scope == "company_shared",
+                    Document.department_id.in_(assigned_ids),
+                )
+            )
+        else:
+            stmt = stmt.where(Document.scope == "company_shared")
     docs = tc.db.scalars(stmt.order_by(Document.created_at.desc())).all()
 
     results: list[KnowledgeDocumentOut] = []
@@ -216,11 +229,29 @@ def delete_knowledge_document(
     document_id: uuid.UUID,
     tc: Annotated[TenantContext, Depends(require_permission(Permission.KNOWLEDGE_WRITE))],
 ) -> None:
+    from app.services import department as department_service
+
     doc = tc.db.scalar(
         select(Document).where(Document.tenant_id == tc.tenant_id, Document.id == document_id)
     )
     if not doc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Knowledge document not found")
+
+    if doc.scope == "company_shared" or doc.department_id is None:
+        if not department_service.is_company_admin(tc.role):
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN,
+                "Only company owners or admins can delete company_shared documents.",
+            )
+    else:
+        department_service.check_department_access(
+            tc.db,
+            tenant_id=tc.tenant_id,
+            user_id=tc.user.id,
+            role=tc.role,
+            department_id=doc.department_id,
+            require_write=True,
+        )
 
     title = doc.title
     tc.db.delete(doc)

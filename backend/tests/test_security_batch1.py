@@ -24,8 +24,11 @@ from app.connectors.oauth import InMemoryOAuthStateStore, sign_state
 from app.connectors.service import ConnectionService, ConnectionView
 from app.db.enums import (
     ActionStatus,
+    DepartmentRole,
     DepartmentStatus,
     DepartmentType,
+    DocumentSource,
+    DocumentStatus,
     Region,
     ReviewTaskStatus,
     Role,
@@ -38,6 +41,8 @@ from app.db.enums import (
 from app.db.models import (
     ActionLog,
     Department,
+    DepartmentMember,
+    Document,
     ReviewTask,
     Run,
     RunStep,
@@ -460,5 +465,139 @@ def test_composio_execute_blocks_unapproved_and_money_moving_without_approval(
         )
         assert r_replay.status_code == 200, r_replay.text
         assert len(execute_calls) == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# F-03 / F-04: Knowledge Hub Department Scoping (GET /knowledge & DELETE)
+# ---------------------------------------------------------------------------
+
+
+def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: Session) -> None:
+    tenant = Tenant(
+        id=uuid.uuid4(),
+        name="Knowledge Sec Tenant",
+        slug=f"kb-sec-{uuid.uuid4().hex[:8]}",
+        region=Region.US,
+    )
+    owner = User(id=uuid.uuid4(), email=f"kb-owner-{uuid.uuid4().hex[:8]}@example.com", full_name="Owner")
+    support_builder = User(
+        id=uuid.uuid4(), email=f"kb-sup-{uuid.uuid4().hex[:8]}@example.com", full_name="Support Builder"
+    )
+    for u in (owner, support_builder):
+        set_rls_context(rolled_back_db, user_id=u.id)
+        rolled_back_db.add(u)
+        rolled_back_db.flush()
+
+    set_rls_context(rolled_back_db, tenant_id=tenant.id, user_id=owner.id)
+    rolled_back_db.add(tenant)
+    rolled_back_db.flush()
+
+    support = Department(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        name="Customer Support",
+        code="support",
+        department_type=DepartmentType.SUPPORT,
+        status=DepartmentStatus.ACTIVE,
+    )
+    finance = Department(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        name="Finance",
+        code="finance",
+        department_type=DepartmentType.FINANCE,
+        status=DepartmentStatus.ACTIVE,
+    )
+    rolled_back_db.add_all([support, finance])
+    rolled_back_db.flush()
+
+    rolled_back_db.add(
+        DepartmentMember(
+            tenant_id=tenant.id,
+            department_id=support.id,
+            user_id=support_builder.id,
+            role=DepartmentRole.BUILDER,
+        )
+    )
+    rolled_back_db.flush()
+
+    shared_doc = Document(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        department_id=None,
+        scope="company_shared",
+        source=DocumentSource.UPLOAD,
+        title="Company Handbook",
+        status=DocumentStatus.READY,
+    )
+    support_doc = Document(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        department_id=support.id,
+        scope="department_private",
+        source=DocumentSource.UPLOAD,
+        title="Support Runbook",
+        status=DocumentStatus.READY,
+    )
+    finance_doc = Document(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        department_id=finance.id,
+        scope="department_private",
+        source=DocumentSource.UPLOAD,
+        title="Finance Confidential POs",
+        status=DocumentStatus.READY,
+    )
+    rolled_back_db.add_all([shared_doc, support_doc, finance_doc])
+    rolled_back_db.flush()
+
+    active_tc: dict[str, TenantContext] = {
+        "tc": TenantContext(
+            user=support_builder,
+            tenant_id=tenant.id,
+            role=Role.BUILDER,
+            db=rolled_back_db,
+        )
+    }
+    app.dependency_overrides[get_tenant_context] = lambda: active_tc["tc"]
+    try:
+        client = TestClient(app)
+
+        # 1. GET /knowledge (without department_id) as Support builder -> sees ONLY company_shared + support_private
+        r_sup_list = client.get("/knowledge")
+        assert r_sup_list.status_code == 200, r_sup_list.text
+        titles = {d["title"] for d in r_sup_list.json()}
+        assert titles == {"Company Handbook", "Support Runbook"}
+        assert "Finance Confidential POs" not in titles
+
+        # 2. DELETE Finance private doc as Support builder -> 403
+        r_del_fin = client.delete(f"/knowledge/{finance_doc.id}")
+        assert r_del_fin.status_code == 403, r_del_fin.text
+
+        # 3. DELETE company_shared doc as Support builder -> 403 (owner/admin only)
+        r_del_shared = client.delete(f"/knowledge/{shared_doc.id}")
+        assert r_del_shared.status_code == 403, r_del_shared.text
+
+        # 4. DELETE Support private doc as Support builder -> 204
+        r_del_sup = client.delete(f"/knowledge/{support_doc.id}")
+        assert r_del_sup.status_code == 204, r_del_sup.text
+
+        # 5. Switch to OWNER -> GET /knowledge sees remaining docs including Finance private doc
+        active_tc["tc"] = TenantContext(
+            user=owner,
+            tenant_id=tenant.id,
+            role=Role.OWNER,
+            db=rolled_back_db,
+        )
+        r_own_list = client.get("/knowledge")
+        assert r_own_list.status_code == 200, r_own_list.text
+        own_titles = {d["title"] for d in r_own_list.json()}
+        assert own_titles == {"Company Handbook", "Finance Confidential POs"}
+
+        # 6. OWNER can delete company_shared doc -> 204
+        r_own_del_shared = client.delete(f"/knowledge/{shared_doc.id}")
+        assert r_own_del_shared.status_code == 204, r_own_del_shared.text
     finally:
         app.dependency_overrides.clear()
