@@ -61,7 +61,7 @@ DEPARTMENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "name": "Finance",
         "code": "finance",
         "description": "Extract supplier invoice fields, verify against purchase orders, route mismatches for human approval, and create invoice records.",
-        "recommended_providers": ["gmail", "google_drive", "zoho_invoice"],
+        "recommended_providers": ["gmail", "google_drive", "zoho_books"],
         "default_settings": {"require_human_review": True, "financial_policy_strict": True},
     },
     "sales": {
