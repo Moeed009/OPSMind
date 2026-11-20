@@ -601,3 +601,204 @@ def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: 
         assert r_own_del_shared.status_code == 204, r_own_del_shared.text
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# F-05: GET /reviews & POST /reviews/{id}/decide Department RBAC
+# ---------------------------------------------------------------------------
+
+
+def test_reviews_list_and_decide_enforce_department_reviewer_role(rolled_back_db: Session) -> None:
+    tenant = Tenant(
+        id=uuid.uuid4(),
+        name="Reviews Sec Tenant",
+        slug=f"rev-sec-{uuid.uuid4().hex[:8]}",
+        region=Region.US,
+    )
+    owner = User(id=uuid.uuid4(), email=f"rev-own-{uuid.uuid4().hex[:8]}@example.com", full_name="Owner")
+    support_reviewer = User(
+        id=uuid.uuid4(), email=f"rev-sup-{uuid.uuid4().hex[:8]}@example.com", full_name="Support Reviewer"
+    )
+    finance_viewer = User(
+        id=uuid.uuid4(), email=f"rev-finv-{uuid.uuid4().hex[:8]}@example.com", full_name="Finance Viewer"
+    )
+    for u in (owner, support_reviewer, finance_viewer):
+        set_rls_context(rolled_back_db, user_id=u.id)
+        rolled_back_db.add(u)
+        rolled_back_db.flush()
+
+    set_rls_context(rolled_back_db, tenant_id=tenant.id, user_id=owner.id)
+    rolled_back_db.add(tenant)
+    rolled_back_db.flush()
+
+    support = Department(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        name="Customer Support",
+        code="support",
+        department_type=DepartmentType.SUPPORT,
+        status=DepartmentStatus.ACTIVE,
+    )
+    finance = Department(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        name="Finance",
+        code="finance",
+        department_type=DepartmentType.FINANCE,
+        status=DepartmentStatus.ACTIVE,
+    )
+    rolled_back_db.add_all([support, finance])
+    rolled_back_db.flush()
+
+    rolled_back_db.add_all(
+        [
+            DepartmentMember(
+                tenant_id=tenant.id,
+                department_id=support.id,
+                user_id=support_reviewer.id,
+                role=DepartmentRole.REVIEWER,
+            ),
+            DepartmentMember(
+                tenant_id=tenant.id,
+                department_id=finance.id,
+                user_id=finance_viewer.id,
+                role=DepartmentRole.VIEWER,
+            ),
+        ]
+    )
+    rolled_back_db.flush()
+
+    def _make_review_task(dept_id: uuid.UUID | None, name: str) -> ReviewTask:
+        wf = Workflow(id=uuid.uuid4(), tenant_id=tenant.id, department_id=dept_id, name=name)
+        rolled_back_db.add(wf)
+        rolled_back_db.flush()
+        ver = WorkflowVersion(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            workflow_id=wf.id,
+            version_number=1,
+            status=WorkflowVersionStatus.PUBLISHED,
+            definition={"trigger": {"type": "manual"}, "nodes": [], "edges": []},
+        )
+        rolled_back_db.add(ver)
+        rolled_back_db.flush()
+        run = Run(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            department_id=dept_id,
+            workflow_id=wf.id,
+            workflow_version_id=ver.id,
+            trigger_source=TriggerSource.MANUAL,
+            status=RunStatus.WAITING_HUMAN,
+            trace_id=uuid.uuid4().hex,
+            input={},
+        )
+        rolled_back_db.add(run)
+        rolled_back_db.flush()
+        step = RunStep(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            run_id=run.id,
+            step_index=0,
+            node_id="review_1",
+            step_type="approval",
+            status=RunStepStatus.COMPLETED,
+        )
+        rolled_back_db.add(step)
+        rolled_back_db.flush()
+        rt = ReviewTask(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            run_id=run.id,
+            run_step_id=step.id,
+            status=ReviewTaskStatus.OPEN,
+            risk_reason=f"Review for {name}",
+            proposal={"note": name},
+            deadline_at=datetime.now(UTC) + timedelta(hours=24),
+        )
+        rolled_back_db.add(rt)
+        rolled_back_db.flush()
+        return rt
+
+    support_task = _make_review_task(support.id, "Support Flow")
+    finance_task = _make_review_task(finance.id, "Finance Flow")
+    legacy_task = _make_review_task(None, "Legacy Flow")
+
+    active_tc: dict[str, TenantContext] = {
+        "tc": TenantContext(
+            user=support_reviewer,
+            tenant_id=tenant.id,
+            role=Role.REVIEWER,
+            db=rolled_back_db,
+        )
+    }
+    app.dependency_overrides[get_tenant_context] = lambda: active_tc["tc"]
+    try:
+        client = TestClient(app)
+
+        # 1. Support reviewer lists reviews -> sees Support + Legacy read-only, NEVER Finance
+        r_sup_list = client.get("/reviews?status=open")
+        assert r_sup_list.status_code == 200, r_sup_list.text
+        ids = {item["id"] for item in r_sup_list.json()}
+        assert str(support_task.id) in ids
+        assert str(legacy_task.id) in ids
+        assert str(finance_task.id) not in ids
+
+        # 2. Support reviewer CANNOT decide Finance task -> 403
+        r_sup_fin = client.post(
+            f"/reviews/{finance_task.id}/decide",
+            json={"decision": "approved", "reason": "cross-dept attempt"},
+        )
+        assert r_sup_fin.status_code == 403, r_sup_fin.text
+
+        # 3. Legacy task stays read-only -> 409
+        r_leg = client.post(
+            f"/reviews/{legacy_task.id}/decide",
+            json={"decision": "approved", "reason": "legacy attempt"},
+        )
+        assert r_leg.status_code == 409, r_leg.text
+
+        # 4. Support reviewer CAN decide Support task -> 200
+        r_sup_ok = client.post(
+            f"/reviews/{support_task.id}/decide",
+            json={"decision": "approved", "reason": "looks good"},
+        )
+        assert r_sup_ok.status_code == 200, r_sup_ok.text
+        assert r_sup_ok.json()["status"] == "approved"
+
+        # 5. Finance member with VIEWER dept role cannot list or decide Finance task
+        active_tc["tc"] = TenantContext(
+            user=finance_viewer,
+            tenant_id=tenant.id,
+            role=Role.REVIEWER,
+            db=rolled_back_db,
+        )
+        r_fv_list = client.get("/reviews?status=open&exclude_legacy=true")
+        assert r_fv_list.status_code == 200, r_fv_list.text
+        assert r_fv_list.json() == []
+
+        r_fv_dec = client.post(
+            f"/reviews/{finance_task.id}/decide",
+            json={"decision": "approved", "reason": "viewer attempt"},
+        )
+        assert r_fv_dec.status_code == 403, r_fv_dec.text
+
+        # 6. Company OWNER can list and decide Finance task -> 200
+        active_tc["tc"] = TenantContext(
+            user=owner,
+            tenant_id=tenant.id,
+            role=Role.OWNER,
+            db=rolled_back_db,
+        )
+        r_own_list = client.get("/reviews?status=open&exclude_legacy=true")
+        assert r_own_list.status_code == 200, r_own_list.text
+        assert {item["id"] for item in r_own_list.json()} == {str(finance_task.id)}
+
+        r_own_dec = client.post(
+            f"/reviews/{finance_task.id}/decide",
+            json={"decision": "approved", "reason": "owner approved"},
+        )
+        assert r_own_dec.status_code == 200, r_own_dec.text
+        assert r_own_dec.json()["status"] == "approved"
+    finally:
+        app.dependency_overrides.clear()

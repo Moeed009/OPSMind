@@ -10,13 +10,14 @@ from sqlalchemy import select
 
 from app.api.deps import TenantContext
 from app.api.rbac import require_permission
-from app.core.permissions import Permission
+from app.core.permissions import Permission, has_permission
 from app.db.enums import ReviewTaskStatus, RunStatus
 from app.db.models.review_task import ReviewTask
 from app.db.models.run import Run
 from app.db.models.workflow import Workflow
 from app.db.models.workflow_version import WorkflowVersion
 from app.schemas.review import ReviewTaskDecisionRequest, ReviewTaskOut
+from app.services import department as department_service
 
 router = APIRouter(prefix="/reviews", tags=["reviews"])
 
@@ -40,12 +41,41 @@ def list_review_tasks(
     stmt = stmt.order_by(ReviewTask.created_at.desc())
     tasks = tc.db.scalars(stmt).all()
 
+    is_admin = department_service.is_company_admin(tc.role)
+    assigned_ids = (
+        None
+        if is_admin
+        else department_service.get_assigned_department_ids(tc.db, tc.tenant_id, tc.user.id)
+    )
+    eff_role_cache: dict[uuid.UUID, bool] = {}
+
     results: list[ReviewTaskOut] = []
     for t in tasks:
         wf_name = "Automated Pipeline"
         run = tc.db.get(Run, t.run_id)
-        if exclude_legacy and (run is None or run.department_id is None):
+        is_legacy = run is None or run.department_id is None
+        if exclude_legacy and is_legacy:
             continue
+        if not is_legacy and not is_admin:
+            dept_id = run.department_id
+            assert dept_id is not None
+            if assigned_ids is None or dept_id not in assigned_ids:
+                continue
+            can_review = eff_role_cache.get(dept_id)
+            if can_review is None:
+                eff_role = department_service.get_effective_department_role(
+                    tc.db,
+                    tenant_id=tc.tenant_id,
+                    user_id=tc.user.id,
+                    tenant_role=tc.role,
+                    department_id=dept_id,
+                )
+                can_review = eff_role is not None and has_permission(
+                    eff_role, Permission.REVIEWS_DECIDE
+                )
+                eff_role_cache[dept_id] = can_review
+            if not can_review:
+                continue
         if run:
             ver = tc.db.get(WorkflowVersion, run.workflow_version_id)
             if ver:
@@ -71,7 +101,7 @@ def list_review_tasks(
                 decision_reason=t.decision_reason,
                 workflow_name=wf_name,
                 department_id=run.department_id if run else None,
-                is_legacy_readonly=(run is None or run.department_id is None),
+                is_legacy_readonly=is_legacy,
             )
         )
     return results
@@ -94,6 +124,16 @@ def decide_review_task(
             status.HTTP_409_CONFLICT,
             "Legacy review tasks (department_id is null) are read-only and cannot be approved or resumed.",
         )
+
+    department_service.require_department_permission(
+        tc.db,
+        tenant_id=tc.tenant_id,
+        user_id=tc.user.id,
+        tenant_role=tc.role,
+        department_id=run.department_id,
+        permission=Permission.REVIEWS_DECIDE,
+        require_active=True,
+    )
 
     decision_val = payload.decision.lower()
     if decision_val not in ("approved", "edited", "rejected"):
