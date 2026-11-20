@@ -802,3 +802,103 @@ def test_reviews_list_and_decide_enforce_department_reviewer_role(rolled_back_db
         assert r_own_dec.json()["status"] == "approved"
     finally:
         app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# F-13 (Security): Fail-closed APP_DATABASE_URL & Active Department Check in Celery Task
+# ---------------------------------------------------------------------------
+
+
+def test_connectors_build_service_fails_closed_without_app_database_url(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    connectors_api._build_service.cache_clear()
+    fake_settings = SimpleNamespace(
+        database_url="postgresql+psycopg://postgres:secret@localhost:5432/postgres",
+        app_database_url="",
+        oauth_state_secret="secret-32-bytes-minimum-for-test-only!",
+        connector_encryption_keys="",
+        connector_encryption_current_key_id="",
+    )
+    monkeypatch.setattr(connectors_api, "get_settings", lambda: fake_settings)
+    try:
+        with pytest.raises(RuntimeError, match="APP_DATABASE_URL is not configured"):
+            connectors_api._build_service()
+    finally:
+        connectors_api._build_service.cache_clear()
+
+
+def test_execute_workflow_run_task_blocks_inactive_and_archived_department(
+    rolled_back_db: Session, monkeypatch
+) -> None:
+    from contextlib import contextmanager
+
+    from app.workflows import tasks as wf_tasks
+
+    tenant = Tenant(
+        id=uuid.uuid4(),
+        name="Task Guard Tenant",
+        slug=f"task-sec-{uuid.uuid4().hex[:8]}",
+        region=Region.US,
+    )
+    set_rls_context(rolled_back_db, tenant_id=tenant.id)
+    rolled_back_db.add(tenant)
+    rolled_back_db.flush()
+
+    for bad_status in (DepartmentStatus.INACTIVE, DepartmentStatus.ARCHIVED):
+        dept = Department(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            name=f"Dept {bad_status.value}",
+            code=f"dept-{bad_status.value}",
+            department_type=DepartmentType.SUPPORT,
+            status=bad_status,
+        )
+        rolled_back_db.add(dept)
+        rolled_back_db.flush()
+
+        wf = Workflow(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            department_id=dept.id,
+            name=f"WF {bad_status.value}",
+        )
+        rolled_back_db.add(wf)
+        rolled_back_db.flush()
+
+        ver = WorkflowVersion(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            workflow_id=wf.id,
+            version_number=1,
+            status=WorkflowVersionStatus.PUBLISHED,
+            definition={"trigger": {"type": "manual"}, "nodes": [], "edges": []},
+        )
+        rolled_back_db.add(ver)
+        rolled_back_db.flush()
+
+        class _SessionWrapper:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, exc_type, exc, tb):
+                return False
+
+            @contextmanager
+            def begin(self_inner):
+                nested = rolled_back_db.begin_nested()
+                try:
+                    yield
+                finally:
+                    nested.rollback()
+
+            def __getattr__(self_inner, item):
+                return getattr(rolled_back_db, item)
+
+        monkeypatch.setattr(wf_tasks, "get_session_factory", lambda: _SessionWrapper)
+
+        with pytest.raises(ValueError, match="not active"):
+            wf_tasks.execute_workflow_run_task.run(str(tenant.id), str(wf.id), {"x": 1})
+
+        runs = rolled_back_db.scalars(select(Run).where(Run.workflow_id == wf.id)).all()
+        assert runs == []

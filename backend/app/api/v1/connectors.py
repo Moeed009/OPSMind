@@ -106,8 +106,8 @@ def _build_service() -> ConnectionService:
     from app.connectors.sql_repo import SqlConnectionRepo, SqlOAuthStateStore
 
     settings = get_settings()
-    if not settings.database_url:
-        raise RuntimeError("DATABASE_URL is not configured")
+    if not settings.app_database_url:
+        raise RuntimeError("APP_DATABASE_URL is not configured")
     if not settings.oauth_state_secret:
         raise RuntimeError("OAUTH_STATE_SECRET is not configured")
 
@@ -118,7 +118,7 @@ def _build_service() -> ConnectionService:
         }
     )
     engine = create_async_engine(
-        settings.app_database_url or settings.database_url,
+        settings.app_database_url,
         connect_args={"prepare_threshold": None},
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)

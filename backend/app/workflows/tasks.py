@@ -8,8 +8,8 @@ from typing import Any
 from celery import shared_task
 from sqlalchemy import select
 
-from app.db.enums import RunStatus, TriggerSource, WorkflowVersionStatus
-from app.db.models import Run, Workflow, WorkflowVersion
+from app.db.enums import DepartmentStatus, RunStatus, TriggerSource, WorkflowVersionStatus
+from app.db.models import Department, Run, Workflow, WorkflowVersion
 from app.db.rls import set_rls_context
 from app.db.session import get_session_factory
 from app.workflows.dept_executor import (
@@ -55,6 +55,16 @@ def execute_workflow_run_task(
                 raise ValueError(f"Workflow {workflow_id} not found")
             if wf.department_id is None:
                 raise ValueError("Legacy workflows (department_id is null) are read-only and cannot be executed.")
+            dept = db.scalar(
+                select(Department).where(
+                    Department.tenant_id == tenant_id,
+                    Department.id == wf.department_id,
+                )
+            )
+            if dept is None or dept.status != DepartmentStatus.ACTIVE:
+                raise ValueError(
+                    f"Cannot execute workflow {workflow_id}: department is missing or not active."
+                )
             ver = db.scalar(
                 select(WorkflowVersion)
                 .where(
@@ -86,6 +96,8 @@ def execute_workflow_run_task(
                 "cost_usd": str(run.cost_usd),
                 "tokens": run.total_tokens,
             }
+        except ValueError:
+            raise
         except Exception as exc:
             logger.error("Celery workflow run failed (attempt %s/%s): %s", self.request.retries + 1, self.max_retries, exc)
             if self.request.retries < self.max_retries:
