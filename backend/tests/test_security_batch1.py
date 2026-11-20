@@ -161,7 +161,7 @@ class _FakeUser:
 # ---------------------------------------------------------------------------
 
 
-def test_composio_oauth_callback_rejects_missing_forged_and_replayed_state(monkeypatch) -> None:
+def test_f01_composio_oauth_callback_rejects_missing_forged_and_replayed_state(monkeypatch) -> None:
     from app.services import composio_service
     from app.services import department as department_service
 
@@ -276,7 +276,7 @@ def test_composio_oauth_callback_rejects_missing_forged_and_replayed_state(monke
 # ---------------------------------------------------------------------------
 
 
-def test_composio_execute_blocks_unapproved_and_money_moving_without_approval(
+def test_f02_composio_execute_blocks_unapproved_and_money_moving_without_approval(
     rolled_back_db: Session, monkeypatch
 ) -> None:
     from app.services import composio_service
@@ -470,11 +470,11 @@ def test_composio_execute_blocks_unapproved_and_money_moving_without_approval(
 
 
 # ---------------------------------------------------------------------------
-# F-03 / F-04: Knowledge Hub Department Scoping (GET /knowledge & DELETE)
+# F-03 & F-04: Knowledge Hub Department Scoping (Separate API-Level Tests)
 # ---------------------------------------------------------------------------
 
 
-def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: Session) -> None:
+def _seed_two_dept_knowledge(rolled_back_db: Session):
     tenant = Tenant(
         id=uuid.uuid4(),
         name="Knowledge Sec Tenant",
@@ -552,7 +552,13 @@ def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: 
     )
     rolled_back_db.add_all([shared_doc, support_doc, finance_doc])
     rolled_back_db.flush()
+    return tenant, owner, support_builder, shared_doc, support_doc, finance_doc
 
+
+def test_f03_knowledge_list_scopes_private_docs_by_department(rolled_back_db: Session) -> None:
+    tenant, owner, support_builder, _shared_doc, _support_doc, _finance_doc = (
+        _seed_two_dept_knowledge(rolled_back_db)
+    )
     active_tc: dict[str, TenantContext] = {
         "tc": TenantContext(
             user=support_builder,
@@ -565,26 +571,14 @@ def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: 
     try:
         client = TestClient(app)
 
-        # 1. GET /knowledge (without department_id) as Support builder -> sees ONLY company_shared + support_private
+        # Support builder sees ONLY company_shared + Support private (NEVER Finance private)
         r_sup_list = client.get("/knowledge")
         assert r_sup_list.status_code == 200, r_sup_list.text
         titles = {d["title"] for d in r_sup_list.json()}
         assert titles == {"Company Handbook", "Support Runbook"}
         assert "Finance Confidential POs" not in titles
 
-        # 2. DELETE Finance private doc as Support builder -> 403
-        r_del_fin = client.delete(f"/knowledge/{finance_doc.id}")
-        assert r_del_fin.status_code == 403, r_del_fin.text
-
-        # 3. DELETE company_shared doc as Support builder -> 403 (owner/admin only)
-        r_del_shared = client.delete(f"/knowledge/{shared_doc.id}")
-        assert r_del_shared.status_code == 403, r_del_shared.text
-
-        # 4. DELETE Support private doc as Support builder -> 204
-        r_del_sup = client.delete(f"/knowledge/{support_doc.id}")
-        assert r_del_sup.status_code == 204, r_del_sup.text
-
-        # 5. Switch to OWNER -> GET /knowledge sees remaining docs including Finance private doc
+        # Company OWNER sees all documents across all departments
         active_tc["tc"] = TenantContext(
             user=owner,
             tenant_id=tenant.id,
@@ -594,9 +588,48 @@ def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: 
         r_own_list = client.get("/knowledge")
         assert r_own_list.status_code == 200, r_own_list.text
         own_titles = {d["title"] for d in r_own_list.json()}
-        assert own_titles == {"Company Handbook", "Finance Confidential POs"}
+        assert own_titles == {"Company Handbook", "Support Runbook", "Finance Confidential POs"}
+    finally:
+        app.dependency_overrides.clear()
 
-        # 6. OWNER can delete company_shared doc -> 204
+
+def test_f04_knowledge_delete_enforces_department_write_and_admin_shared(
+    rolled_back_db: Session,
+) -> None:
+    tenant, owner, support_builder, shared_doc, support_doc, finance_doc = (
+        _seed_two_dept_knowledge(rolled_back_db)
+    )
+    active_tc: dict[str, TenantContext] = {
+        "tc": TenantContext(
+            user=support_builder,
+            tenant_id=tenant.id,
+            role=Role.BUILDER,
+            db=rolled_back_db,
+        )
+    }
+    app.dependency_overrides[get_tenant_context] = lambda: active_tc["tc"]
+    try:
+        client = TestClient(app)
+
+        # Support builder CANNOT delete Finance private doc -> 403
+        r_del_fin = client.delete(f"/knowledge/{finance_doc.id}")
+        assert r_del_fin.status_code == 403, r_del_fin.text
+
+        # Support builder CANNOT delete company_shared doc -> 403 (owner/admin only)
+        r_del_shared = client.delete(f"/knowledge/{shared_doc.id}")
+        assert r_del_shared.status_code == 403, r_del_shared.text
+
+        # Support builder CAN delete Support private doc -> 204
+        r_del_sup = client.delete(f"/knowledge/{support_doc.id}")
+        assert r_del_sup.status_code == 204, r_del_sup.text
+
+        # Company OWNER CAN delete company_shared doc -> 204
+        active_tc["tc"] = TenantContext(
+            user=owner,
+            tenant_id=tenant.id,
+            role=Role.OWNER,
+            db=rolled_back_db,
+        )
         r_own_del_shared = client.delete(f"/knowledge/{shared_doc.id}")
         assert r_own_del_shared.status_code == 204, r_own_del_shared.text
     finally:
@@ -608,7 +641,9 @@ def test_knowledge_list_and_delete_enforce_department_isolation(rolled_back_db: 
 # ---------------------------------------------------------------------------
 
 
-def test_reviews_list_and_decide_enforce_department_reviewer_role(rolled_back_db: Session) -> None:
+def test_f05_reviews_support_reviewer_blocked_from_finance_list_and_decide(
+    rolled_back_db: Session,
+) -> None:
     tenant = Tenant(
         id=uuid.uuid4(),
         name="Reviews Sec Tenant",
@@ -809,7 +844,7 @@ def test_reviews_list_and_decide_enforce_department_reviewer_role(rolled_back_db
 # ---------------------------------------------------------------------------
 
 
-def test_connectors_build_service_fails_closed_without_app_database_url(monkeypatch) -> None:
+def test_f13_connectors_build_service_fails_closed_without_app_database_url(monkeypatch) -> None:
     from types import SimpleNamespace
 
     connectors_api._build_service.cache_clear()
@@ -828,7 +863,7 @@ def test_connectors_build_service_fails_closed_without_app_database_url(monkeypa
         connectors_api._build_service.cache_clear()
 
 
-def test_execute_workflow_run_task_blocks_inactive_and_archived_department(
+def test_f13_execute_workflow_run_task_blocks_inactive_and_archived_department(
     rolled_back_db: Session, monkeypatch
 ) -> None:
     from contextlib import contextmanager
