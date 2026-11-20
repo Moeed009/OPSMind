@@ -1,7 +1,11 @@
-"""Pytest safety guard and isolated test-DB wiring (F-08).
+"""Hard pytest safety guard and isolated test-DB wiring.
 
-Refuses to run the test suite if TEST_DATABASE_URL / TEST_APP_DATABASE_URL is missing,
-matches the real .env DATABASE_URL / APP_DATABASE_URL, or targets a production Supabase host.
+At pytest session start (before any test runs or touches a database):
+- Requires TEST_DATABASE_URL and TEST_APP_DATABASE_URL (NEVER falls back to DATABASE_URL).
+- Host MUST be localhost or 127.0.0.1.
+- Database name MUST be 'opsmind_test'.
+- Must NOT match the real DATABASE_URL / APP_DATABASE_URL in backend/.env.
+If any check fails, pytest aborts immediately with a clear error message.
 """
 from __future__ import annotations
 
@@ -11,15 +15,14 @@ from urllib.parse import urlparse
 
 import pytest
 
-_ALLOWED_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "postgres", "db"})
-_BLOCKED_HOST_SUFFIXES = (".supabase.com", ".supabase.co", "supabase.com", "supabase.co")
+ALLOWED_TEST_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1"})
+REQUIRED_TEST_DB_NAME = "opsmind_test"
 
 
 def _parse_db_target(url: str) -> tuple[str, int, str]:
     cleaned = (url or "").strip()
     if not cleaned:
         return ("", 0, "")
-    # Normalize SQLAlchemy dialect prefix (postgresql+psycopg:// -> postgresql://)
     if "://" in cleaned:
         scheme, rest = cleaned.split("://", 1)
         cleaned = f"{scheme.split('+')[0]}://{rest}"
@@ -57,13 +60,13 @@ def assert_safe_test_db_urls(
     *,
     real_db_url: str = "",
     real_app_db_url: str = "",
-    allow_remote: bool = False,
 ) -> None:
-    """Validate that test DB URLs are configured, isolated from real DB, and not pointing at Supabase."""
-    if not test_db_url or not test_app_db_url:
+    """Enforce that test DB URLs are explicitly provided, local-only, and target opsmind_test."""
+    if not (test_db_url or "").strip() or not (test_app_db_url or "").strip():
         raise RuntimeError(
             "REFUSING TO RUN TESTS: TEST_DATABASE_URL and TEST_APP_DATABASE_URL must both be set "
-            "to an isolated test Postgres database (never the real DB)."
+            f"(host in {sorted(ALLOWED_TEST_HOSTS)}, database '{REQUIRED_TEST_DB_NAME}'). "
+            "Tests never fall back to DATABASE_URL."
         )
 
     real_targets = {
@@ -74,25 +77,23 @@ def assert_safe_test_db_urls(
         ("TEST_APP_DATABASE_URL", test_app_db_url),
     ):
         target = _parse_db_target(url)
-        host = target[0]
+        host, _port, dbname = target
         if not host:
             raise RuntimeError(f"REFUSING TO RUN TESTS: {label} is not a valid database URL.")
+        if host not in ALLOWED_TEST_HOSTS:
+            raise RuntimeError(
+                f"REFUSING TO RUN TESTS: {label} host '{host}' is not allowed. "
+                f"Only {sorted(ALLOWED_TEST_HOSTS)} are permitted."
+            )
+        if dbname != REQUIRED_TEST_DB_NAME:
+            raise RuntimeError(
+                f"REFUSING TO RUN TESTS: {label} database '{dbname}' is not allowed. "
+                f"Database name must be '{REQUIRED_TEST_DB_NAME}'."
+            )
         if target in real_targets:
             raise RuntimeError(
                 f"REFUSING TO RUN TESTS: {label} points to the same database as the real "
                 "DATABASE_URL / APP_DATABASE_URL in .env."
-            )
-        if any(host.endswith(sfx) for sfx in _BLOCKED_HOST_SUFFIXES) and not allow_remote:
-            raise RuntimeError(
-                f"REFUSING TO RUN TESTS: {label} targets a remote Supabase host. "
-                "Use a local Docker Postgres test DB or set OPSMIND_ALLOW_REMOTE_TEST_DB=1 "
-                "with a dedicated Supabase branch DB (different from .env DATABASE_URL)."
-            )
-        if host not in _ALLOWED_LOCAL_HOSTS and not allow_remote:
-            raise RuntimeError(
-                f"REFUSING TO RUN TESTS: {label} targets non-local host '{host}'. "
-                "Use local Postgres or explicitly opt in with OPSMIND_ALLOW_REMOTE_TEST_DB=1 "
-                "against a dedicated branch DB."
             )
 
 
@@ -101,19 +102,12 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
     test_db_url = os.environ.get("TEST_DATABASE_URL", "").strip()
     test_app_db_url = os.environ.get("TEST_APP_DATABASE_URL", "").strip()
 
-    # In CI (GitHub Actions), DATABASE_URL / APP_DATABASE_URL point to the ephemeral local Postgres service.
-    if not test_db_url and os.environ.get("CI", "").lower() == "true":
-        test_db_url = os.environ.get("DATABASE_URL", "").strip()
-        test_app_db_url = os.environ.get("APP_DATABASE_URL", "").strip()
-
-    allow_remote = os.environ.get("OPSMIND_ALLOW_REMOTE_TEST_DB", "").strip() == "1"
     try:
         assert_safe_test_db_urls(
             test_db_url,
             test_app_db_url,
             real_db_url=real_db_url,
             real_app_db_url=real_app_db_url,
-            allow_remote=allow_remote,
         )
     except RuntimeError as exc:
         pytest.exit(str(exc), returncode=2)
