@@ -34,7 +34,7 @@ def upgrade() -> None:
         SET status = 'revoked',
             credentials_ciphertext = NULL,
             credentials_key_id = NULL,
-            cursor = NULL
+            sync_cursor = NULL
         WHERE provider IN {_REMOVED_PROVIDERS}
           AND (
               EXISTS (SELECT 1 FROM action_logs al WHERE al.connection_id = connections.id)
