@@ -8,9 +8,13 @@ from __future__ import annotations
 import time
 import urllib.parse
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from app.api.deps import TenantContext, get_tenant_context
 from app.api.v1 import connectors as connectors_api
@@ -18,8 +22,49 @@ from app.connectors import crypto
 from app.connectors.base import ConnectionStatus as ConnStatus
 from app.connectors.oauth import InMemoryOAuthStateStore, sign_state
 from app.connectors.service import ConnectionService, ConnectionView
-from app.db.enums import Role
+from app.db.enums import (
+    ActionStatus,
+    DepartmentStatus,
+    DepartmentType,
+    Region,
+    ReviewTaskStatus,
+    Role,
+    RunStatus,
+    RunStepStatus,
+    TriggerSource,
+    WorkflowApprovalStatus,
+    WorkflowVersionStatus,
+)
+from app.db.models import (
+    ActionLog,
+    Department,
+    ReviewTask,
+    Run,
+    RunStep,
+    Tenant,
+    User,
+    Workflow,
+    WorkflowApproval,
+    WorkflowVersion,
+)
+from app.db.rls import set_rls_context
+from app.db.session import get_engine
 from app.main import app
+
+
+@pytest.fixture()
+def rolled_back_db():
+    """Real Postgres session wrapped in an outer transaction that ALWAYS rolls back."""
+    engine = get_engine()
+    conn = engine.connect()
+    outer_tx = conn.begin()
+    session = Session(bind=conn, join_transaction_mode="create_savepoint", expire_on_commit=False)
+    try:
+        yield session
+    finally:
+        session.close()
+        outer_tx.rollback()
+        conn.close()
 
 
 class _FakeAdminRepo:
@@ -217,5 +262,203 @@ def test_composio_oauth_callback_rejects_missing_forged_and_replayed_state(monke
         )
         assert r_replay.status_code == 400, r_replay.text
         assert len(repo.rows) == 1
+    finally:
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# F-02: POST /connections/composio/execute — Allowlist, Approval Gate & Idempotency
+# ---------------------------------------------------------------------------
+
+
+def test_composio_execute_blocks_unapproved_and_money_moving_without_approval(
+    rolled_back_db: Session, monkeypatch
+) -> None:
+    from app.services import composio_service
+
+    tenant = Tenant(
+        id=uuid.uuid4(),
+        name="Composio Sec Tenant",
+        slug=f"comp-sec-{uuid.uuid4().hex[:8]}",
+        region=Region.US,
+    )
+    user = User(id=uuid.uuid4(), email=f"owner-{uuid.uuid4().hex[:8]}@example.com", full_name="Owner")
+    set_rls_context(rolled_back_db, tenant_id=tenant.id, user_id=user.id)
+    rolled_back_db.add_all([tenant, user])
+    rolled_back_db.flush()
+
+    finance = Department(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        name="Finance",
+        code="finance",
+        department_type=DepartmentType.FINANCE,
+        status=DepartmentStatus.ACTIVE,
+    )
+    rolled_back_db.add(finance)
+    rolled_back_db.flush()
+
+    wf = Workflow(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        department_id=finance.id,
+        name="Refund Flow",
+    )
+    rolled_back_db.add(wf)
+    rolled_back_db.flush()
+    ver = WorkflowVersion(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        workflow_id=wf.id,
+        version_number=1,
+        status=WorkflowVersionStatus.PUBLISHED,
+        definition={"trigger": {"type": "manual"}, "nodes": [], "edges": []},
+    )
+    rolled_back_db.add(ver)
+    rolled_back_db.flush()
+    run = Run(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        department_id=finance.id,
+        workflow_id=wf.id,
+        workflow_version_id=ver.id,
+        trigger_source=TriggerSource.MANUAL,
+        status=RunStatus.WAITING_APPROVAL,
+        trace_id=uuid.uuid4().hex,
+        input={},
+    )
+    rolled_back_db.add(run)
+    rolled_back_db.flush()
+
+    step = RunStep(
+        id=uuid.uuid4(),
+        tenant_id=tenant.id,
+        run_id=run.id,
+        step_index=0,
+        node_id="approve_1",
+        step_type="approval",
+        status=RunStepStatus.COMPLETED,
+    )
+    rolled_back_db.add(step)
+    rolled_back_db.flush()
+
+    # Pending (unapproved) ReviewTask — must NOT satisfy money-moving gate
+    rolled_back_db.add(
+        ReviewTask(
+            id=uuid.uuid4(),
+            tenant_id=tenant.id,
+            run_id=run.id,
+            run_step_id=step.id,
+            status=ReviewTaskStatus.OPEN,
+            risk_reason="Refund requires approval",
+            proposal={"amount": 5000},
+            deadline_at=datetime.now(UTC) + timedelta(hours=24),
+        )
+    )
+    rolled_back_db.flush()
+
+    execute_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(composio_service, "is_composio_configured", lambda: True)
+    monkeypatch.setattr(
+        composio_service,
+        "execute_tool",
+        lambda user_id, tool_slug, arguments=None: (
+            execute_calls.append({"user_id": user_id, "tool_slug": tool_slug, "arguments": arguments})
+            or {"ok": True, "tool_slug": tool_slug, "refund_id": "re_123"}
+        ),
+    )
+
+    tc = TenantContext(user=user, tenant_id=tenant.id, role=Role.OWNER, db=rolled_back_db)
+    app.dependency_overrides[get_tenant_context] = lambda: tc
+    try:
+        client = TestClient(app)
+
+        # 1. Unapproved provider tool -> 403
+        r_unapproved = client.post(
+            "/connections/composio/execute",
+            json={
+                "tool_slug": "PIPEDRIVE_CREATE_DEAL",
+                "arguments": {"title": "Deal"},
+                "department_id": str(finance.id),
+            },
+        )
+        assert r_unapproved.status_code == 403, r_unapproved.text
+        assert len(execute_calls) == 0
+
+        # 2. Money-moving Stripe tool without run_id -> 403
+        r_no_run = client.post(
+            "/connections/composio/execute",
+            json={
+                "tool_slug": "STRIPE_CREATE_REFUND",
+                "arguments": {"charge": "ch_1"},
+                "department_id": str(finance.id),
+            },
+        )
+        assert r_no_run.status_code == 403, r_no_run.text
+        assert len(execute_calls) == 0
+
+        # 3. Money-moving Stripe tool with run_id that only has OPEN ReviewTask -> 403
+        r_unapproved_run = client.post(
+            "/connections/composio/execute",
+            json={
+                "tool_slug": "STRIPE_CREATE_REFUND",
+                "arguments": {"charge": "ch_1"},
+                "department_id": str(finance.id),
+                "run_id": str(run.id),
+                "idempotency_key": "stripe-refund-key-1",
+            },
+        )
+        assert r_unapproved_run.status_code == 403, r_unapproved_run.text
+        assert len(execute_calls) == 0
+
+        # 4. Approve via WorkflowApproval -> succeeds, writes ActionLog, and replays idempotently
+        rolled_back_db.add(
+            WorkflowApproval(
+                id=uuid.uuid4(),
+                tenant_id=tenant.id,
+                department_id=finance.id,
+                run_id=run.id,
+                node_id="approve_1",
+                required_role="reviewer",
+                status=WorkflowApprovalStatus.APPROVED,
+            )
+        )
+        rolled_back_db.flush()
+
+        r_ok = client.post(
+            "/connections/composio/execute",
+            json={
+                "tool_slug": "STRIPE_CREATE_REFUND",
+                "arguments": {"charge": "ch_1"},
+                "department_id": str(finance.id),
+                "run_id": str(run.id),
+                "idempotency_key": "stripe-refund-key-1",
+            },
+        )
+        assert r_ok.status_code == 200, r_ok.text
+        assert len(execute_calls) == 1
+
+        log_row = rolled_back_db.scalar(
+            select(ActionLog).where(
+                ActionLog.tenant_id == tenant.id,
+                ActionLog.idempotency_key == "stripe-refund-key-1",
+            )
+        )
+        assert log_row is not None
+        assert log_row.status == ActionStatus.SUCCEEDED
+
+        # Second call with same idempotency_key -> replayed without calling Composio again
+        r_replay = client.post(
+            "/connections/composio/execute",
+            json={
+                "tool_slug": "STRIPE_CREATE_REFUND",
+                "arguments": {"charge": "ch_1"},
+                "department_id": str(finance.id),
+                "run_id": str(run.id),
+                "idempotency_key": "stripe-refund-key-1",
+            },
+        )
+        assert r_replay.status_code == 200, r_replay.text
+        assert len(execute_calls) == 1
     finally:
         app.dependency_overrides.clear()

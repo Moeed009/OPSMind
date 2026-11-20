@@ -62,6 +62,8 @@ class ComposioExecuteRequest(BaseModel):
     tool_slug: str = Field(min_length=1)
     arguments: dict[str, Any] = Field(default_factory=dict)
     department_id: str | None = None
+    run_id: str | None = None
+    idempotency_key: str | None = None
 
 def _audit(action: str, tenant_id: str, user_id: str | None, payload: dict) -> None:
     logger.info("audit action=%s tenant=%s user=%s payload=%s", action, tenant_id, user_id, payload)
@@ -431,23 +433,50 @@ async def execute_composio_tool(
     payload: ComposioExecuteRequest,
     tc: TenantCtx,
 ) -> dict[str, Any]:
-    """Execute a tool inside the current tenant's or department's Composio session."""
-    from app.services import composio_service
+    """Execute an allowlisted Composio tool via ActionDispatcher with approval, idempotency, and audit controls."""
+    import uuid
 
-    actor = _require_dept_connection_permission(
-        tc, payload.department_id, Permission.CONNECTIONS_MANAGE
+    from app.services import composio_service
+    from app.workflows.actions import ActionDispatcher, ActionError
+
+    _require_dept_connection_permission(
+        tc, payload.department_id, Permission.CONNECTIONS_MANAGE, require_active=True
     )
     if not composio_service.is_composio_configured():
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
             "COMPOSIO_API_KEY is not configured in backend/.env",
         )
+    dept_uuid: uuid.UUID | None = None
+    if payload.department_id:
+        try:
+            dept_uuid = uuid.UUID(str(payload.department_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "department_id must be a valid UUID"
+            ) from exc
+    run_uuid: uuid.UUID | None = None
+    if payload.run_id:
+        try:
+            run_uuid = uuid.UUID(str(payload.run_id))
+        except ValueError as exc:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT, "run_id must be a valid UUID"
+            ) from exc
+
     try:
-        return composio_service.execute_tool(
-            user_id=_composio_scope_user_id(actor.tenant_id, payload.department_id),
+        return ActionDispatcher.dispatch_composio(
+            tc.db,
+            tenant_id=tc.tenant_id,
+            user_id=tc.user.id,
+            department_id=dept_uuid,
             tool_slug=payload.tool_slug,
             arguments=payload.arguments,
+            run_id=run_uuid,
+            idempotency_key=payload.idempotency_key,
         )
+    except ActionError as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from exc
     except Exception as exc:
         logger.exception("Composio tool execution failed: %s", exc)
         raise HTTPException(status.HTTP_502_BAD_GATEWAY, str(exc)) from exc

@@ -711,12 +711,64 @@ class ActionDispatcher:
         "stripe.create_transfer",
     })
 
+    _APPROVED_COMPOSIO_TOOLKIT_PREFIXES = frozenset({
+        "GMAIL_",
+        "GOOGLEDRIVE_",
+        "GOOGLECALENDAR_",
+        "GOOGLESHEETS_",
+        "SLACK_",
+        "HUBSPOT_",
+        "STRIPE_",
+    })
+
+    _STRIPE_MONEY_MOVING_KEYWORDS = (
+        "CHARGE",
+        "REFUND",
+        "PAYOUT",
+        "TRANSFER",
+        "PAYMENT",
+        "PAY_INVOICE",
+        "CAPTURE",
+    )
+
     _STRIPE_ENDPOINTS = {
         "stripe.create_charge": "charges",
         "stripe.create_refund": "refunds",
         "stripe.create_payout": "payouts",
         "stripe.create_transfer": "transfers",
     }
+
+    @classmethod
+    def is_composio_tool_allowed(cls, tool_slug: str) -> bool:
+        upper = (tool_slug or "").strip().upper()
+        return any(upper.startswith(prefix) for prefix in cls._APPROVED_COMPOSIO_TOOLKIT_PREFIXES)
+
+    @classmethod
+    def is_composio_money_moving(cls, tool_slug: str) -> bool:
+        upper = (tool_slug or "").strip().upper()
+        if not upper.startswith("STRIPE_"):
+            return False
+        return any(kw in upper for kw in cls._STRIPE_MONEY_MOVING_KEYWORDS)
+
+    @classmethod
+    def _has_human_approval(cls, db: Session, tenant_id: uuid.UUID, run_id: uuid.UUID) -> bool:
+        approved_review = db.scalar(
+            select(ReviewTask.id).where(
+                ReviewTask.tenant_id == tenant_id,
+                ReviewTask.run_id == run_id,
+                ReviewTask.status == ReviewTaskStatus.APPROVED,
+            )
+        )
+        if approved_review is not None:
+            return True
+        approved_wf = db.scalar(
+            select(WorkflowApproval.id).where(
+                WorkflowApproval.tenant_id == tenant_id,
+                WorkflowApproval.run_id == run_id,
+                WorkflowApproval.status == WorkflowApprovalStatus.APPROVED,
+            )
+        )
+        return approved_wf is not None
 
     @classmethod
     def _run_stripe(
@@ -730,25 +782,12 @@ class ActionDispatcher:
     ) -> tuple[uuid.UUID, str, dict[str, Any]]:
         if action_type not in cls._STRIPE_ENDPOINTS:
             raise ActionError(f"Unsupported Stripe action: {action_type}")
-        if action_type in cls._STRIPE_MONEY_MOVING_ACTIONS:
-            approved_review = db.scalar(
-                select(ReviewTask.id).where(
-                    ReviewTask.tenant_id == tenant_id,
-                    ReviewTask.run_id == run_id,
-                    ReviewTask.status == ReviewTaskStatus.APPROVED,
-                )
+        if action_type in cls._STRIPE_MONEY_MOVING_ACTIONS and not cls._has_human_approval(
+            db, tenant_id, run_id
+        ):
+            raise ActionError(
+                "Money-moving Stripe action requires an approved ReviewTask or WorkflowApproval and cannot run from an Agent/AI-only path."
             )
-            approved_wf = db.scalar(
-                select(WorkflowApproval.id).where(
-                    WorkflowApproval.tenant_id == tenant_id,
-                    WorkflowApproval.run_id == run_id,
-                    WorkflowApproval.status == WorkflowApprovalStatus.APPROVED,
-                )
-            )
-            if approved_review is None and approved_wf is None:
-                raise ActionError(
-                    "Money-moving Stripe action requires an approved ReviewTask or WorkflowApproval and cannot run from an Agent/AI-only path."
-                )
 
         conn = cls._active_connection(db, tenant_id, "stripe", department_id=department_id)
         if conn is None:
@@ -926,3 +965,118 @@ class ActionDispatcher:
             error=error_msg,
             idempotent_replay=False,
         )
+
+    @classmethod
+    def dispatch_composio(
+        cls,
+        db: Session,
+        *,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID | None,
+        department_id: uuid.UUID | None,
+        tool_slug: str,
+        arguments: dict[str, Any],
+        run_id: uuid.UUID | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Execute an allowlisted Composio tool with money-moving approval gate, idempotency, and audit logging."""
+        from app.db.models.audit_log import AuditLog
+        from app.services import composio_service
+
+        clean_slug = (tool_slug or "").strip()
+        if not cls.is_composio_tool_allowed(clean_slug):
+            raise ActionError(
+                f"Composio tool '{clean_slug}' is not in the approved provider allowlist."
+            )
+
+        if cls.is_composio_money_moving(clean_slug):
+            if run_id is None or not cls._has_human_approval(db, tenant_id, run_id):
+                raise ActionError(
+                    "Money-moving Stripe tool requires an approved ReviewTask or WorkflowApproval for run_id."
+                )
+
+        scope_user_id = f"{tenant_id}:dept:{department_id}" if department_id else str(tenant_id)
+        action_type = f"composio.{clean_slug.lower()}"
+        now = datetime.now(UTC)
+
+        existing_log: ActionLog | None = None
+        eff_idem_key = idempotency_key or (f"{run_id}:composio:{clean_slug}" if run_id else None)
+        if run_id is not None and eff_idem_key:
+            existing_log = db.scalar(
+                select(ActionLog).where(
+                    ActionLog.tenant_id == tenant_id,
+                    ActionLog.idempotency_key == eff_idem_key,
+                )
+            )
+            if existing_log and existing_log.status == ActionStatus.SUCCEEDED:
+                return dict(existing_log.response or {"idempotent_replay": True, "tool_slug": clean_slug})
+
+        try:
+            result = composio_service.execute_tool(
+                user_id=scope_user_id,
+                tool_slug=clean_slug,
+                arguments=arguments,
+            )
+        except Exception as exc:
+            if run_id is not None and eff_idem_key:
+                if existing_log:
+                    existing_log.status = ActionStatus.FAILED
+                    existing_log.attempts += 1
+                    existing_log.error = str(exc)
+                    existing_log.executed_at = now
+                else:
+                    db.add(
+                        ActionLog(
+                            tenant_id=tenant_id,
+                            run_id=run_id,
+                            run_step_id=None,
+                            connection_id=None,
+                            action_type=action_type,
+                            idempotency_key=eff_idem_key,
+                            status=ActionStatus.FAILED,
+                            request={"tool_slug": clean_slug, "department_id": str(department_id) if department_id else None},
+                            response={},
+                            attempts=1,
+                            error=str(exc),
+                            executed_at=now,
+                        )
+                    )
+                db.flush()
+            raise
+
+        if run_id is not None and eff_idem_key:
+            if existing_log:
+                existing_log.status = ActionStatus.SUCCEEDED
+                existing_log.attempts += 1
+                existing_log.response = result
+                existing_log.error = None
+                existing_log.executed_at = now
+            else:
+                db.add(
+                    ActionLog(
+                        tenant_id=tenant_id,
+                        run_id=run_id,
+                        run_step_id=None,
+                        connection_id=None,
+                        action_type=action_type,
+                        idempotency_key=eff_idem_key,
+                        status=ActionStatus.SUCCEEDED,
+                        request={"tool_slug": clean_slug, "department_id": str(department_id) if department_id else None},
+                        response=result,
+                        attempts=1,
+                        executed_at=now,
+                    )
+                )
+        else:
+            db.add(
+                AuditLog(
+                    tenant_id=tenant_id,
+                    actor_user_id=user_id,
+                    action="composio.tool_executed",
+                    entity_type="connection",
+                    entity_id=str(department_id) if department_id else None,
+                    details={"tool_slug": clean_slug, "department_id": str(department_id) if department_id else None},
+                )
+            )
+        db.flush()
+        return result
