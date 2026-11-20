@@ -1,6 +1,6 @@
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -9,6 +9,7 @@ from app.db.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 class EmailSetting(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "email_settings"
+    __table_args__ = (UniqueConstraint("tenant_id"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("tenants.id", ondelete="CASCADE"), unique=True, index=True

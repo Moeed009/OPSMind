@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -14,7 +14,8 @@ class Workflow(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "name"),
-        tenant_fk("department_id", "departments"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
+        Index("ix_workflows_tenant_id_department_id", "tenant_id", "department_id"),
     )
 
     department_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)

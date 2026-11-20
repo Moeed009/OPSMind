@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import DateTime, ForeignKey, Index, LargeBinary, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -17,7 +17,8 @@ class Connection(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "provider", "external_account_id"),
-        tenant_fk("department_id", "departments"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
+        Index("ix_connections_tenant_id_department_id", "tenant_id", "department_id"),
     )
 
     department_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)

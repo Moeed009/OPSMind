@@ -31,7 +31,7 @@ class UsageRecord(UUIDPrimaryKeyMixin, TenantScopedMixin, Base):
         UniqueConstraint("tenant_id", "source_key"),
         tenant_fk("run_id", "runs"),
         tenant_fk("workflow_id", "workflows"),
-        tenant_fk("department_id", "departments"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
         CheckConstraint("quantity >= 0", name="quantity_non_negative"),
         CheckConstraint("cost_usd >= 0", name="cost_non_negative"),
                 Index(

@@ -18,7 +18,8 @@ class Event(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "connection_id", "dedup_key"),
         tenant_fk("connection_id", "connections"),
-        tenant_fk("department_id", "departments"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
+        Index("ix_events_tenant_id_department_id", "tenant_id", "department_id"),
         Index("ix_events_tenant_id_status_created_at", "tenant_id", "status", "created_at"),
     )
 

@@ -13,6 +13,7 @@ from app.db.models.event import Event
 from app.db.models.guardrail_event import GuardrailEvent
 from app.db.models.invitation import Invitation
 from app.db.models.membership import Membership
+from app.db.models.oauth_state import OAuthState
 from app.db.models.review_task import ReviewTask
 from app.db.models.run import Run
 from app.db.models.run_step import RunStep
@@ -42,6 +43,7 @@ __all__ = [
     "GuardrailEvent",
     "Invitation",
     "Membership",
+    "OAuthState",
     "ReviewTask",
     "Run",
     "RunStep",
