@@ -5,6 +5,7 @@ revoke, list, health, manual poll, sanitized audit entries.
 """
 from __future__ import annotations
 
+import secrets
 import time
 import uuid
 from collections.abc import Callable
@@ -13,11 +14,14 @@ from typing import Protocol
 
 from . import crypto
 from .base import ConnectionStatus, Connector, OAuth2Connector, TokenSet
-from .errors import AccountAlreadyBound, ConnectorError, Forbidden, NotFound
+from .errors import AccountAlreadyBound, ConnectorError, Forbidden, InvalidOAuthState, NotFound
 from .ingestion import ConnectionRepo, ConnectionState, PollResult, poll_connection
 from .oauth import (
+    STATE_TTL_SECONDS,
     OAuthStateStore,
+    StateRecord,
     complete_authorization,
+    sign_state,
     start_authorization,
     verify_state,
 )
@@ -87,6 +91,49 @@ class ConnectionService:
             connector, tenant_id=actor.tenant_id, user_id=actor.user_id, store=self.store,
             state_secret=self.secret, redirect_uri=self.redirect_uri, department_id=department_id, clock=self.clock,
         )
+
+    async def issue_composio_state(
+        self, actor: Actor, provider: str, department_id: str | None = None
+    ) -> str:
+        """Issue a signed, single-use OAuth state bound to tenant, user, provider, and department."""
+        actor.require(CONNECTIONS_MANAGE)
+        nonce = secrets.token_urlsafe(32)
+        exp = self.clock() + STATE_TTL_SECONDS
+        await self.store.save(
+            StateRecord(
+                nonce=nonce,
+                tenant_id=str(actor.tenant_id),
+                user_id=str(actor.user_id),
+                provider=provider,
+                code_verifier="composio",
+                expires_at=exp,
+            )
+        )
+        return sign_state(
+            nonce=nonce,
+            provider=provider,
+            secret=self.secret,
+            exp=exp,
+            tenant_id=str(actor.tenant_id),
+            department_id=department_id,
+        )
+
+    async def verify_composio_state(self, state: str) -> tuple[str, str, str, str | None]:
+        """Verify and atomically consume a Composio OAuth state.
+
+        Returns (tenant_id, user_id, provider, department_id) derived strictly from the
+        signed state and server-side state store.
+        """
+        claims = verify_state(state, secret=self.secret, clock=self.clock)
+        tid = claims.get("tid")
+        if tid and hasattr(self.store, "hint_tenant"):
+            self.store.hint_tenant(claims["nonce"], str(tid))
+        rec = await self.store.consume(claims["nonce"])
+        if rec is None or rec.provider != claims["provider"] or rec.code_verifier != "composio":
+            raise InvalidOAuthState("state already used or expired")
+        if tid and str(tid) != str(rec.tenant_id):
+            raise InvalidOAuthState("tenant mismatch")
+        return rec.tenant_id, rec.user_id, rec.provider, claims.get("did")
 
     async def _resolve_account_conflict(
         self, tenant_id: str, provider: str, account_id: str, department_id: str | None

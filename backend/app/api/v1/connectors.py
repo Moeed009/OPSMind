@@ -359,11 +359,15 @@ async def start_oauth(
 
     settings = get_settings()
     if composio_service.is_composio_configured():
-        dept_param = f"&department_id={urllib.parse.quote(str(department_id))}"
+        try:
+            signed_state = await service.issue_composio_state(
+                actor, provider, department_id=department_id
+            )
+        except ConnectorError as exc:
+            raise _http_error(exc) from exc
         callback_url = (
             f"{settings.oauth_redirect_base_url.rstrip('/')}{settings.api_prefix}"
-            f"/connections/oauth/callback?composio_provider={urllib.parse.quote(provider)}"
-            f"&tenant_id={urllib.parse.quote(actor.tenant_id)}{dept_param}"
+            f"/connections/oauth/callback?composio=1&state={urllib.parse.quote(signed_state)}"
         )
         try:
             res = composio_service.authorize_provider(
@@ -457,9 +461,8 @@ async def finish_oauth(
     state: Annotated[str | None, Query()] = None,
     error: Annotated[str | None, Query()] = None,
     error_description: Annotated[str | None, Query()] = None,
+    composio: Annotated[str | None, Query()] = None,
     composio_provider: Annotated[str | None, Query()] = None,
-    tenant_id: Annotated[str | None, Query()] = None,
-    department_id: Annotated[str | None, Query()] = None,
     connectedAccountId: Annotated[str | None, Query()] = None,
 ):
     """Provider redirect target. Supports both Composio session callback and direct OAuth callback."""
@@ -481,26 +484,55 @@ async def finish_oauth(
             )
         raise HTTPException(status.HTTP_400_BAD_REQUEST, err_msg)
 
-    if composio_provider and tenant_id and composio_service.is_composio_configured():
+    is_composio_cb = bool(composio or composio_provider or (connectedAccountId and not code))
+    if is_composio_cb:
+        if not composio_service.is_composio_configured():
+            err_msg = "Composio is not configured."
+            if wants_html:
+                return RedirectResponse(
+                    url=f"{settings.frontend_url.rstrip('/')}/connectors?error={urllib.parse.quote_plus(err_msg)}",
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err_msg)
+        if not state:
+            err_msg = "Missing signed OAuth state for Composio callback."
+            if wants_html:
+                return RedirectResponse(
+                    url=f"{settings.frontend_url.rstrip('/')}/connectors?error={urllib.parse.quote_plus(err_msg)}",
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err_msg)
         try:
-            scoped_uid = _composio_scope_user_id(tenant_id, department_id)
-            tk_state = composio_service.get_toolkit_connection_state(scoped_uid, composio_provider)
+            verified_tenant_id, verified_user_id, verified_provider, verified_dept_id = (
+                await service.verify_composio_state(state)
+            )
+        except InvalidOAuthState as exc:
+            err_msg = str(exc) or "Invalid or replayed OAuth state."
+            if wants_html:
+                return RedirectResponse(
+                    url=f"{settings.frontend_url.rstrip('/')}/connectors?error={urllib.parse.quote_plus(err_msg)}",
+                    status_code=status.HTTP_303_SEE_OTHER,
+                )
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, err_msg) from exc
+        try:
+            scoped_uid = _composio_scope_user_id(verified_tenant_id, verified_dept_id)
+            tk_state = composio_service.get_toolkit_connection_state(scoped_uid, verified_provider)
             acct_id = (
-                connectedAccountId
-                or tk_state.get("connected_account_id")
-                or f"composio:{composio_provider}:{(department_id or tenant_id)[:8]}"
+                tk_state.get("connected_account_id")
+                or connectedAccountId
+                or f"composio:{verified_provider}:{(verified_dept_id or verified_tenant_id)[:8]}"
             )
             comp_actor = Actor(
-                tenant_id=tenant_id,
-                user_id=None,
+                tenant_id=verified_tenant_id,
+                user_id=verified_user_id,
                 permissions=frozenset({CONNECTIONS_READ, CONNECTIONS_MANAGE}),
             )
             view = await service.direct_connect(
                 comp_actor,
-                composio_provider,
+                verified_provider,
                 str(acct_id),
                 {"access_token": f"composio_managed:{acct_id}", "composio_managed": True},
-                department_id=department_id,
+                department_id=verified_dept_id,
             )
             if wants_html:
                 return RedirectResponse(
