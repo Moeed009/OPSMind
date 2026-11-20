@@ -176,49 +176,118 @@ class TestPhase5ExecutionEngineAndCelery:
                 outer_tx.rollback()
 
     def test_action_dispatcher_records_failure_without_fake_connection(self):
-        """Verifies missing email recipient fails loudly and logs ActionLog with connection_id=None."""
-        factory = get_session_factory()
-        tenant_id = uuid.UUID("1a4f8bd9-5dd4-42f6-a607-6d393f80112d")
+        """Verifies missing email recipient fails loudly and logs ActionLog with connection_id=None in a rolled-back tx."""
+        from sqlalchemy.orm import Session
 
-        with factory() as db, db.begin():
-            set_rls_context(db, tenant_id=tenant_id)
-            existing_run = db.scalars(select(Run).where(Run.tenant_id == tenant_id)).first()
-            assert existing_run is not None
-            idem_key = f"test_fail_{uuid.uuid4().hex}"
+        from app.db.enums import (
+            DepartmentStatus,
+            DepartmentType,
+            Region,
+            RunStatus,
+            TriggerSource,
+            WorkflowVersionStatus,
+        )
+        from app.db.models import Department, Tenant, Workflow, WorkflowVersion
+        from app.db.session import get_engine
 
-            res = ActionDispatcher.dispatch(
-                db=db,
-                tenant_id=tenant_id,
-                run_id=existing_run.id,
-                run_step_id=None,
-                action_type="email.reply",
-                config={"idempotency_key": idem_key},
-                context={"subject": "No recipient"},
-            )
-            assert res.success is False
-            assert "No email recipient" in (res.error or "")
-
-            log_row = db.scalar(
-                select(ActionLog).where(
-                    ActionLog.tenant_id == tenant_id,
-                    ActionLog.idempotency_key == idem_key,
+        engine = get_engine()
+        with engine.connect() as raw_conn:
+            outer_tx = raw_conn.begin()
+            db = Session(bind=raw_conn, join_transaction_mode="create_savepoint", expire_on_commit=False)
+            try:
+                tenant = Tenant(
+                    id=uuid.uuid4(),
+                    name="FailLog Test Co",
+                    slug=f"faillog-{uuid.uuid4().hex[:8]}",
+                    region=Region.US,
                 )
-            )
-            assert log_row is not None
-            assert log_row.status == ActionStatus.FAILED
-            assert log_row.connection_id is None
+                set_rls_context(db, tenant_id=tenant.id)
+                db.add(tenant)
+                db.flush()
+
+                dept = Department(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    name="Support",
+                    code="support",
+                    department_type=DepartmentType.SUPPORT,
+                    status=DepartmentStatus.ACTIVE,
+                )
+                db.add(dept)
+                db.flush()
+
+                wf = Workflow(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    department_id=dept.id,
+                    name="FailLog WF",
+                )
+                db.add(wf)
+                db.flush()
+
+                ver = WorkflowVersion(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    workflow_id=wf.id,
+                    version_number=1,
+                    status=WorkflowVersionStatus.PUBLISHED,
+                    definition={"trigger": {"type": "manual"}, "nodes": [], "edges": []},
+                )
+                db.add(ver)
+                db.flush()
+
+                run = Run(
+                    id=uuid.uuid4(),
+                    tenant_id=tenant.id,
+                    department_id=dept.id,
+                    workflow_id=wf.id,
+                    workflow_version_id=ver.id,
+                    trigger_source=TriggerSource.MANUAL,
+                    status=RunStatus.RUNNING,
+                    trace_id=uuid.uuid4().hex,
+                    input={},
+                )
+                db.add(run)
+                db.flush()
+
+                idem_key = f"test_fail_{uuid.uuid4().hex}"
+                res = ActionDispatcher.dispatch(
+                    db=db,
+                    tenant_id=tenant.id,
+                    run_id=run.id,
+                    run_step_id=None,
+                    action_type="email.reply",
+                    config={"idempotency_key": idem_key},
+                    context={"subject": "No recipient"},
+                    department_id=dept.id,
+                )
+                assert res.success is False
+                assert "No email recipient" in (res.error or "")
+
+                log_row = db.scalar(
+                    select(ActionLog).where(
+                        ActionLog.tenant_id == tenant.id,
+                        ActionLog.idempotency_key == idem_key,
+                    )
+                )
+                assert log_row is not None
+                assert log_row.status == ActionStatus.FAILED
+                assert log_row.connection_id is None
+            finally:
+                db.close()
+                outer_tx.rollback()
 
     def test_smtp_password_encryption_and_cross_tenant_isolation(self):
         """Verifies tenant SMTP password encryption round-trip and system email isolation."""
         from app.connectors.errors import CryptoError
         from app.services.email import (
-             _system_email_config,
+            _system_email_config,
             decrypt_smtp_password,
             encrypt_smtp_password,
             get_effective_email_config,
         )
 
-        tenant_id = uuid.UUID("1a4f8bd9-5dd4-42f6-a607-6d393f80112d")
+        tenant_id = uuid.uuid4()
         other_tenant = uuid.uuid4()
         secret = "s3cr3t-smtp-app-password"
 
@@ -230,12 +299,13 @@ class TestPhase5ExecutionEngineAndCelery:
             decrypt_smtp_password(encrypted, other_tenant)
 
         factory = get_session_factory()
-        with factory() as db, db.begin():
+        with factory() as db:
             sys_cfg = get_effective_email_config(db=db, tenant_id=None)
             assert sys_cfg == _system_email_config()
 
     def test_sql_connection_repo_cross_tenant_isolation_under_app_role(self):
-        """Verifies SqlConnectionRepo under app_database_url enforces RLS and blocks cross-tenant access."""
+        """Verifies SqlConnectionRepo under app_database_url enforces RLS in a rolled-back transaction."""
+        from sqlalchemy import text
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
         from app.connectors.sql_repo import SqlConnectionRepo
@@ -244,32 +314,60 @@ class TestPhase5ExecutionEngineAndCelery:
 
         async def _check() -> None:
             settings = get_settings()
-            tenant_a = "1a4f8bd9-5dd4-42f6-a607-6d393f80112d"
+            assert settings.app_database_url, "APP_DATABASE_URL must be set for RLS test"
+            tenant_a = str(uuid.uuid4())
             tenant_b = str(uuid.uuid4())
             conn_id = str(uuid.uuid4())
             acct_id = f"rls-test-{uuid.uuid4().hex[:8]}"
 
             engine = create_async_engine(
-                settings.app_database_url or settings.database_url,
+                settings.app_database_url,
                 connect_args={"prepare_threshold": None},
             )
-            sf = async_sessionmaker(engine, expire_on_commit=False)
-            repo = SqlConnectionRepo(sf)
             try:
-                await repo.upsert_credentials(conn_id, tenant_a, "slack", acct_id, "cipher-a", "k1")
-                assert await repo.get_view(tenant_a, conn_id) is not None
-                assert await repo.get_view(tenant_b, conn_id) is None
-                assert await repo.get_for_tenant(tenant_b, conn_id) is None
+                async with engine.connect() as conn:
+                    outer_tx = await conn.begin()
+                    try:
+                        sf = async_sessionmaker(
+                            bind=conn,
+                            join_transaction_mode="create_savepoint",
+                            expire_on_commit=False,
+                        )
+                        async with sf() as seed_s, seed_s.begin():
+                            await seed_s.execute(
+                                text("SELECT set_config('app.current_tenant', :t, true)"),
+                                {"t": tenant_a},
+                            )
+                            await seed_s.execute(
+                                text(
+                                    "INSERT INTO tenants (id, name, slug, region, plan) "
+                                    "VALUES (:id, :name, :slug, 'us', 'free')"
+                                ),
+                                {
+                                    "id": tenant_a,
+                                    "name": "RLS Conn Test Co",
+                                    "slug": f"rls-conn-{uuid.uuid4().hex[:8]}",
+                                },
+                            )
 
-                await repo.mark_revoked(conn_id, tenant_id=tenant_b)
-                view_after_b_revoke = await repo.get_view(tenant_a, conn_id)
-                assert view_after_b_revoke is not None
-                assert view_after_b_revoke.status.value != "revoked"
+                        repo = SqlConnectionRepo(sf)
+                        await repo.upsert_credentials(
+                            conn_id, tenant_a, "slack", acct_id, "cipher-a", "k1"
+                        )
+                        assert await repo.get_view(tenant_a, conn_id) is not None
+                        assert await repo.get_view(tenant_b, conn_id) is None
+                        assert await repo.get_for_tenant(tenant_b, conn_id) is None
 
-                await repo.delete(conn_id, tenant_id=tenant_b)
-                assert await repo.get_view(tenant_a, conn_id) is not None
+                        await repo.mark_revoked(conn_id, tenant_id=tenant_b)
+                        view_after_b_revoke = await repo.get_view(tenant_a, conn_id)
+                        assert view_after_b_revoke is not None
+                        assert view_after_b_revoke.status.value != "revoked"
+
+                        await repo.delete(conn_id, tenant_id=tenant_b)
+                        assert await repo.get_view(tenant_a, conn_id) is not None
+                    finally:
+                        await outer_tx.rollback()
             finally:
-                await repo.delete(conn_id, tenant_id=tenant_a)
                 await engine.dispose()
 
         _run_coroutine_sync(_check())
