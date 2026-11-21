@@ -191,3 +191,38 @@ def _hermetic_ai_providers(monkeypatch: pytest.MonkeyPatch) -> None:
         orig_init(self, providers=providers, rate_limiter=rate_limiter)
 
     monkeypatch.setattr(dept_ai_mod.DepartmentAiService, "__init__", _hermetic_init)
+
+
+@pytest.fixture(autouse=True)
+def _block_outbound_http_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hard transport-level network guard: fail immediately if any test attempts a real outbound HTTP request.
+
+    In-memory transports (`httpx.MockTransport`, `httpx.ASGITransport`, FastAPI `TestClient`)
+    use their own transport classes and are unaffected. Only real socket transports
+    (`httpx.HTTPTransport` and `httpx.AsyncHTTPTransport`) are intercepted.
+    """
+    import httpx
+
+    orig_sync_handle = httpx.HTTPTransport.handle_request
+    orig_async_handle = httpx.AsyncHTTPTransport.handle_async_request
+
+    def _guard_sync(self, request: httpx.Request) -> httpx.Response:
+        host = (request.url.host or "").lower()
+        if host not in ("localhost", "127.0.0.1", "testserver"):
+            raise RuntimeError(
+                f"HERMETIC NETWORK GUARD: Forbidden real outbound HTTP request in test: "
+                f"{request.method} {request.url.scheme}://{request.url.host}{request.url.path}"
+            )
+        return orig_sync_handle(self, request)
+
+    async def _guard_async(self, request: httpx.Request) -> httpx.Response:
+        host = (request.url.host or "").lower()
+        if host not in ("localhost", "127.0.0.1", "testserver"):
+            raise RuntimeError(
+                f"HERMETIC NETWORK GUARD: Forbidden real outbound async HTTP request in test: "
+                f"{request.method} {request.url.scheme}://{request.url.host}{request.url.path}"
+            )
+        return await orig_async_handle(self, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _guard_sync)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _guard_async)
