@@ -5,6 +5,7 @@ under the non-superuser `opsmind_app` role (where PostgreSQL RLS is genuinely en
 """
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -12,6 +13,8 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.ai.providers.dept_providers import FakeProvider
+from app.ai.services.dept_ai_service import DepartmentAiService
 from app.core.config import get_settings
 from app.db.enums import (
     DepartmentStatus,
@@ -506,7 +509,21 @@ def test_policy_qa_unknown_question_triggers_idk_and_approval_escalation(
     app_role_db.add(run)
     app_role_db.flush()
 
-    finished = execute_department_run(app_role_db, run.id)
+    fake_agent = FakeProvider(
+        "groq",
+        responses=[
+            json.dumps(
+                {
+                    "text": "Hallucinated answer without sources",
+                    "confidence": 0.92,
+                    "has_reliable_source": True,
+                    "sources": [],
+                }
+            )
+        ],
+    )
+    svc = DepartmentAiService(providers={"groq": fake_agent, "gemini": FakeProvider("gemini")})
+    finished = execute_department_run(app_role_db, run.id, ai_service=svc)
     assert finished.output["retrieve_1"]["match_count"] == 0
     assert "I don't know" in finished.output["agent_1"]["text"]
     assert finished.output["agent_1"]["has_reliable_source"] is False

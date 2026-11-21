@@ -60,3 +60,23 @@ def test_pytest_session_aborts_on_remote_host_without_running_tests() -> None:
     combined = proc.stdout + proc.stderr
     assert "REFUSING TO RUN TESTS" in combined
     assert "db.example.supabase.co" in combined
+
+
+def test_conftest_hermetically_blanks_provider_keys_and_defaults_to_fake_ai() -> None:
+    from app.ai.providers.dept_providers import FakeProvider
+    from app.ai.services.ai_service import ai_service
+    from app.ai.services.dept_ai_service import DepartmentAiService
+    from app.core.config import get_settings
+    from tests.conftest import HERMETIC_BLANK_ENV_VARS
+
+    settings = get_settings()
+    for env_key in HERMETIC_BLANK_ENV_VARS:
+        assert os.environ.get(env_key, "") == "", f"{env_key} must be blanked in test session"
+    assert settings.groq_api_key == ""
+    assert settings.gemini_api_key == ""
+    assert settings.composio_api_key == ""
+    assert ai_service.is_live_configured is False
+
+    svc = DepartmentAiService()
+    assert isinstance(svc._router._providers["groq"], FakeProvider)
+    assert isinstance(svc._router._providers["gemini"], FakeProvider)
