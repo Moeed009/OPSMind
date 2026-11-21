@@ -23,6 +23,7 @@ from app.db.models.audit_log import AuditLog
 from app.db.models.connection import Connection
 from app.db.models.doc_chunk import DocChunk
 from app.db.models.document import Document
+from app.services.embeddings import GeminiEmbeddingService, embed_document_chunks
 from app.services.retrieval import chunk_text
 
 
@@ -39,6 +40,7 @@ def upsert_knowledge_document(
     connection_id: uuid.UUID | None = None,
     source_url: str | None = None,
     actor_user_id: uuid.UUID | None = None,
+    embedding_service: GeminiEmbeddingService | None = None,
 ) -> Document:
     clean_scope = "department_private" if (scope == "department_private" and department_id is not None) else "company_shared"
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -86,7 +88,14 @@ def upsert_knowledge_document(
         db.execute(delete(DocChunk).where(DocChunk.tenant_id == tenant_id, DocChunk.document_id == doc.id))
         db.flush()
 
-    for idx, ch in enumerate(chunk_text(content)):
+    chunks = chunk_text(content)
+    vectors, emb_model = embed_document_chunks(
+        chunks,
+        title=doc.title,
+        service=embedding_service,
+    )
+    for idx, ch in enumerate(chunks):
+        vec = vectors[idx] if idx < len(vectors) else None
         db.add(
             DocChunk(
                 tenant_id=tenant_id,
@@ -95,6 +104,8 @@ def upsert_knowledge_document(
                 content=ch,
                 token_count=max(1, len(ch.split())),
                 metadata_={"title": doc.title, "scope": clean_scope},
+                embedding=vec,
+                embedding_model=emb_model if vec is not None else None,
             )
         )
     db.flush()

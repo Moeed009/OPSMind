@@ -78,6 +78,13 @@ class Settings(BaseSettings):
     retrieval_default_top_k: int = 5
     retrieval_max_top_k: int = 20
     retrieval_max_lexemes: int = 32
+    retrieval_vector_min_similarity: float = 0.35
+    retrieval_rrf_k: int = 60
+    embedding_model: str = "gemini-embedding-001"
+    embedding_dimensions: int = 384
+    embedding_timeout_seconds: float = 15.0
+    embedding_max_retries: int = 3
+    embedding_batch_size: int = 32
 
     smtp_host: str = ""
     smtp_port: int = 587
