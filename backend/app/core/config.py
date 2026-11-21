@@ -77,6 +77,7 @@ class Settings(BaseSettings):
     retrieval_min_rank: float = 0.0
     retrieval_default_top_k: int = 5
     retrieval_max_top_k: int = 20
+    retrieval_max_lexemes: int = 32
 
     smtp_host: str = ""
     smtp_port: int = 587

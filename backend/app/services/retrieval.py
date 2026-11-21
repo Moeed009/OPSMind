@@ -138,21 +138,24 @@ def chunk_text(
     return chunks
 
 
-def _extract_safe_lexemes(db: Session, query: str) -> list[str]:
+def _extract_safe_lexemes(db: Session, query: str, *, max_lexemes: int | None = None) -> list[str]:
     """Extract deduplicated alphanumeric stemmed lexemes via Postgres `plainto_tsquery('english', :q)`.
 
     Because `plainto_tsquery` treats all tsquery operators (`&`, `|`, `!`, `:`, `'`, `"`, `(`, `)`)
     as plain punctuation and `_SAFE_LEXEME_RE` only accepts `^[a-z0-9_]+$` tokens, arbitrary user
     input can never trigger a `tsquery` syntax error.
+    Caps output at `max_lexemes` (defaulting to `settings.retrieval_max_lexemes`, default 32)
+    unique lexemes in order of appearance.
     """
     cleaned = (query or "").strip()
     if not cleaned:
         return []
+    cap = max(1, int(max_lexemes if max_lexemes is not None else get_settings().retrieval_max_lexemes))
     bounded = cleaned[:4000]
     raw_tsq = db.scalar(select(cast(func.plainto_tsquery("english", bounded), Text)))
     if not raw_tsq:
         return []
-    return list(dict.fromkeys(_SAFE_LEXEME_RE.findall(str(raw_tsq))))[:64]
+    return list(dict.fromkeys(_SAFE_LEXEME_RE.findall(str(raw_tsq))))[:cap]
 
 
 def _min_required_matched_lexemes(num_lexemes: int) -> int:
@@ -183,7 +186,7 @@ def search_knowledge_chunks(
     if department_id is None and not include_company_shared:
         return []
 
-    lexemes = _extract_safe_lexemes(db, query)
+    lexemes = _extract_safe_lexemes(db, query, max_lexemes=settings.retrieval_max_lexemes)
     if not lexemes:
         return []
 

@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.enums import (
     DepartmentStatus,
     DepartmentType,
@@ -36,7 +37,7 @@ from app.db.models import (
 from app.db.rls import set_rls_context
 from app.db.session import get_engine
 from app.services.knowledge_sync import upsert_knowledge_document
-from app.services.retrieval import chunk_text, search_knowledge_chunks
+from app.services.retrieval import _extract_safe_lexemes, chunk_text, search_knowledge_chunks
 from app.workflows.dept_executor import execute_department_run
 from app.workflows.template_seed import SEED_TEMPLATES
 
@@ -291,6 +292,50 @@ def test_fts_long_email_matches_25th_word_keyword(app_role_db: Session) -> None:
     )
     assert len(results) == 1
     assert results[0].title == "SSO SAML Troubleshooting"
+
+
+def test_fts_very_long_query_200_plus_unique_words_capped_at_max_lexemes(app_role_db: Session) -> None:
+    tenant, support, _finance, _ops = _seed_tenant_and_depts(app_role_db)
+
+    upsert_knowledge_document(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=support.id,
+        scope="department_private",
+        title="Kubernetes Pod OOMKilled Runbook",
+        content=(
+            "When a production Kubernetes container fails with OOMKilled exit code 137, "
+            "increase memory limits in the deployment manifest and inspect heap dumps."
+        ),
+        source=DocumentSource.UPLOAD,
+    )
+
+    # Build a 240+ unique-word query where relevant keywords appear within the first 32 unique
+    # non-stop-word lexemes (at position #18) and 220+ extra unique words follow.
+    prefix_words = [f"uniquetoken{i}" for i in range(1, 18)]
+    target_words = ["kubernetes", "oomkilled", "container"]
+    suffix_words = [f"uniquetoken{i}" for i in range(18, 250)]
+    all_words = prefix_words + target_words + suffix_words
+    assert len(set(all_words)) >= 250
+
+    huge_query = " ".join(all_words)
+    settings = get_settings()
+    assert settings.retrieval_max_lexemes == 32
+
+    extracted = _extract_safe_lexemes(app_role_db, huge_query)
+    assert len(extracted) == 32
+    assert extracted[0] == "uniquetoken1"
+    assert "oomkil" in extracted or "kubernet" in extracted
+
+    results = search_knowledge_chunks(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=support.id,
+        query=huge_query,
+        top_k=5,
+    )
+    assert len(results) == 1
+    assert results[0].title == "Kubernetes Pod OOMKilled Runbook"
 
 
 def test_fts_tenant_rls_and_department_scoping_under_app_role(app_role_db: Session) -> None:
