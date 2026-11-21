@@ -678,53 +678,27 @@ def _execute_retrieve_node(
             "sources": ["internal_operations_aggregate_runs"],
         }
 
-    from sqlalchemy import or_
-
-    from app.db.enums import DocumentStatus
-    from app.db.models.doc_chunk import DocChunk
-    from app.db.models.document import Document
+    from app.services.retrieval import search_knowledge_chunks
 
     rendered_query = render_params({"q": getattr(node, "query_template", "")}, context).get("q", "")
     query_str = str(rendered_query or "").strip()
     top_k = int(getattr(node, "top_k", 5) or 5)
     include_shared = bool(getattr(node, "include_company_shared", True))
 
-    scope_filter = (
-        or_(Document.department_id == run.department_id, Document.scope == "company_shared")
-        if include_shared
-        else (Document.department_id == run.department_id)
+    retrieved = search_knowledge_chunks(
+        db,
+        tenant_id=run.tenant_id,
+        department_id=run.department_id,
+        query=query_str,
+        top_k=top_k,
+        include_company_shared=include_shared,
     )
-
-    stmt = (
-        select(DocChunk, Document)
-        .join(Document, Document.id == DocChunk.document_id)
-        .where(
-            DocChunk.tenant_id == run.tenant_id,
-            Document.tenant_id == run.tenant_id,
-            Document.status != DocumentStatus.FAILED,
-            scope_filter,
-        )
-    )
-    if query_str:
-        tokens = [t for t in query_str.split() if len(t) >= 2][:6]
-        if tokens:
-            stmt = stmt.where(or_(*(DocChunk.content.ilike(f"%{tok}%") for tok in tokens)))
-
-    rows = db.execute(stmt.order_by(DocChunk.created_at.desc()).limit(top_k)).all()
     matches: list[dict[str, Any]] = []
     sources: list[str] = []
-    for chunk, doc in rows:
-        matches.append(
-            {
-                "document_id": str(doc.id),
-                "title": doc.title,
-                "scope": doc.scope,
-                "chunk_index": chunk.chunk_index,
-                "content": chunk.content[:600],
-            }
-        )
-        if doc.title not in sources:
-            sources.append(doc.title)
+    for item in retrieved:
+        matches.append(item.to_dict(preview_chars=600))
+        if item.title not in sources:
+            sources.append(item.title)
     return {
         "mode": "knowledge",
         "query": query_str,
