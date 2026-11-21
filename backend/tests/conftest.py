@@ -18,6 +18,10 @@ import pytest
 ALLOWED_TEST_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1"})
 REQUIRED_TEST_DB_NAME = "opsmind_test"
 
+# Throwaway test-only AES-256 key (base64 of b"opsmind-test-only-32-byte-key-01")
+TEST_ENCRYPTION_KEY_ID = "test-v1"
+TEST_ENCRYPTION_KEYS_JSON = '{"test-v1":"b3BzbWluZC10ZXN0LW9ubHktMzItYnl0ZS1rZXktMDE="}'
+
 
 def _parse_db_target(url: str) -> tuple[str, int, str]:
     cleaned = (url or "").strip()
@@ -114,6 +118,8 @@ def pytest_configure(config: pytest.Config) -> None:  # noqa: ARG001
 
     os.environ["DATABASE_URL"] = test_db_url
     os.environ["APP_DATABASE_URL"] = test_app_db_url
+    os.environ["CONNECTOR_ENCRYPTION_KEYS"] = TEST_ENCRYPTION_KEYS_JSON
+    os.environ["CONNECTOR_ENCRYPTION_CURRENT_KEY_ID"] = TEST_ENCRYPTION_KEY_ID
 
     from app.core.config import get_settings
     from app.db import session as db_session_mod

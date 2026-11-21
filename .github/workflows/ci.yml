@@ -77,6 +77,9 @@ jobs:
         run: uv run alembic check
 
       - name: Test
+        env:
+          CONNECTOR_ENCRYPTION_KEYS: '{"test-v1":"b3BzbWluZC10ZXN0LW9ubHktMzItYnl0ZS1rZXktMDE="}'
+          CONNECTOR_ENCRYPTION_CURRENT_KEY_ID: test-v1
         run: uv run pytest -q
 
   frontend:
