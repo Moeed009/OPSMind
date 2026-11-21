@@ -23,29 +23,7 @@ from app.db.models.audit_log import AuditLog
 from app.db.models.connection import Connection
 from app.db.models.doc_chunk import DocChunk
 from app.db.models.document import Document
-
-
-def chunk_text(text: str, max_chars: int = 1000) -> list[str]:
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    if not paragraphs:
-        return [text.strip()] if text.strip() else []
-    chunks: list[str] = []
-    current = ""
-    for para in paragraphs:
-        if len(current) + len(para) + 2 <= max_chars:
-            current = f"{current}\n\n{para}".strip() if current else para
-        else:
-            if current:
-                chunks.append(current)
-            if len(para) <= max_chars:
-                current = para
-            else:
-                for i in range(0, len(para), max_chars):
-                    chunks.append(para[i : i + max_chars])
-                current = ""
-    if current:
-        chunks.append(current)
-    return chunks or ([text.strip()] if text.strip() else [])
+from app.services.retrieval import chunk_text
 
 
 def upsert_knowledge_document(
