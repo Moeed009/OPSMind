@@ -1,12 +1,13 @@
 """Centralized Knowledge Hub chunking and PostgreSQL Full-Text Search (FTS) retrieval (F-07a)."""
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import Text, cast, func, or_, select, text
+from sqlalchemy import Integer, Text, cast, func, literal_column, or_, select, text
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -15,6 +16,15 @@ from app.db.models.doc_chunk import DocChunk
 from app.db.models.document import Document
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_SAFE_LEXEME_RE = re.compile(r"'([a-z0-9_]+)'")
+
+# Focused queries (<= 8 unique stemmed lexemes) must match at least max(2, ceil(0.5 * N))
+# lexemes when N >= 2, preventing single-word false positives (e.g. "allowance" in
+# "What is the Mars relocation allowance?" matching an unrelated "travel allowance" chunk).
+# Longer natural-language payloads (> 8 lexemes, e.g. full support emails) allow >= 1 match
+# ranked by coverage-weighted ts_rank_cd.
+_FOCUSED_QUERY_MAX_LEXEMES = 8
+_FOCUSED_QUERY_MIN_RATIO = 0.5
 
 
 @dataclass(frozen=True)
@@ -44,7 +54,6 @@ def _tail_overlap(text_block: str, overlap_chars: int) -> str:
     if len(text_block) <= overlap_chars:
         return text_block.strip()
     raw = text_block[-overlap_chars:]
-    # Avoid starting mid-word if there is whitespace inside the overlap window
     first_space = raw.find(" ")
     if 0 < first_space < len(raw) - 1:
         raw = raw[first_space + 1 :]
@@ -63,7 +72,6 @@ def _split_long_paragraph(paragraph: str, max_chars: int) -> list[str]:
             if buf:
                 parts.append(buf)
                 buf = ""
-            # Word-boundary fallback for a single very long sentence
             start = 0
             while start < len(sent):
                 end = min(start + max_chars, len(sent))
@@ -130,31 +138,30 @@ def chunk_text(
     return chunks
 
 
-def _build_or_tsquery_text(db: Session, query: str) -> str | None:
-    """Use Postgres's english text-search parser to strip stop-words/punctuation, stem, and OR-join lexemes.
+def _extract_safe_lexemes(db: Session, query: str) -> list[str]:
+    """Extract deduplicated alphanumeric stemmed lexemes via Postgres `plainto_tsquery('english', :q)`.
 
-    Converts `plainto_tsquery('english', query)` (`'a' & 'b' & 'c'`) into an OR query (`'a' | 'b' | 'c'`)
-    so long natural-language inputs (e.g. support emails) do not fail when one word is absent from KB docs,
-    while `ts_rank_cd` ranks chunks with more matching lexemes higher.
+    Because `plainto_tsquery` treats all tsquery operators (`&`, `|`, `!`, `:`, `'`, `"`, `(`, `)`)
+    as plain punctuation and `_SAFE_LEXEME_RE` only accepts `^[a-z0-9_]+$` tokens, arbitrary user
+    input can never trigger a `tsquery` syntax error.
     """
     cleaned = (query or "").strip()
     if not cleaned:
-        return None
-    # Guard against excessively long payloads while still covering full emails/documents
+        return []
     bounded = cleaned[:4000]
-    tsq_text = db.scalar(
-        select(
-            func.nullif(
-                func.replace(
-                    cast(func.plainto_tsquery("english", bounded), Text),
-                    " & ",
-                    " | ",
-                ),
-                "",
-            )
-        )
-    )
-    return str(tsq_text) if tsq_text else None
+    raw_tsq = db.scalar(select(cast(func.plainto_tsquery("english", bounded), Text)))
+    if not raw_tsq:
+        return []
+    return list(dict.fromkeys(_SAFE_LEXEME_RE.findall(str(raw_tsq))))[:64]
+
+
+def _min_required_matched_lexemes(num_lexemes: int) -> int:
+    """Compute minimum distinct query lexemes a chunk must match."""
+    if num_lexemes <= 1:
+        return num_lexemes
+    if num_lexemes <= _FOCUSED_QUERY_MAX_LEXEMES:
+        return max(2, math.ceil(num_lexemes * _FOCUSED_QUERY_MIN_RATIO))
+    return 1
 
 
 def search_knowledge_chunks(
@@ -176,12 +183,31 @@ def search_knowledge_chunks(
     if department_id is None and not include_company_shared:
         return []
 
-    tsq_text = _build_or_tsquery_text(db, query)
-    if not tsq_text:
+    lexemes = _extract_safe_lexemes(db, query)
+    if not lexemes:
         return []
 
+    tsq_text = " | ".join(f"'{lex}'" for lex in lexemes)
     tsq_expr = text("CAST(:tsq AS tsquery)").bindparams(tsq=tsq_text)
-    rank_expr = func.ts_rank_cd(DocChunk.content_tsv, tsq_expr).label("fts_rank")
+
+    # Count how many distinct query lexemes match each candidate chunk
+    term_checks = [
+        cast(
+            DocChunk.content_tsv.op("@@")(
+                literal_column(f"'''{lex}'''::tsquery")
+            ),
+            Integer,
+        )
+        for lex in lexemes
+    ]
+    matched_terms_expr = term_checks[0]
+    for tc in term_checks[1:]:
+        matched_terms_expr = matched_terms_expr + tc
+
+    min_matched = _min_required_matched_lexemes(len(lexemes))
+    rank_expr = (
+        func.ts_rank_cd(DocChunk.content_tsv, tsq_expr) * matched_terms_expr / float(len(lexemes))
+    ).label("fts_rank")
 
     if include_company_shared:
         scope_filter = (
@@ -201,6 +227,7 @@ def search_knowledge_chunks(
             Document.status == DocumentStatus.READY,
             scope_filter,
             DocChunk.content_tsv.op("@@")(tsq_expr),
+            matched_terms_expr >= min_matched,
             rank_expr > eff_min_rank,
         )
         .order_by(rank_expr.desc(), DocChunk.chunk_index.asc())

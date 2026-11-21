@@ -172,7 +172,7 @@ def test_fts_punctuation_and_english_stemming(app_role_db: Session) -> None:
         department_id=support.id,
         scope="department_private",
         title="Refund Guidelines",
-        content="Customers requesting a refund within 30 days are eligible for full reimbursement.",
+        content="Customers requesting a refund for an order within 30 days are eligible for full reimbursement.",
         source=DocumentSource.UPLOAD,
     )
     upsert_knowledge_document(
@@ -230,7 +230,7 @@ def test_fts_ranks_by_relevance_not_created_at(app_role_db: Session) -> None:
         title="General Quarterly Newsletter",
         content=(
             "Welcome to our quarterly newsletter covering office events, team updates, "
-            "new product launches, and a brief mention of a refund policy update."
+            "new product launches, and a brief mention of a customer refund policy update."
         ),
         source=DocumentSource.UPLOAD,
     )
@@ -475,3 +475,85 @@ def test_policy_qa_unknown_question_triggers_idk_and_approval_escalation(
     ).all()
     assert len(approvals) == 1
     assert approvals[0].status == WorkflowApprovalStatus.PENDING
+
+
+def test_fts_single_word_overlap_travel_allowance_rejected_for_mars_relocation(
+    app_role_db: Session,
+) -> None:
+    """A chunk mentioning 'travel allowance' must NOT match 'What is the Mars relocation allowance?'."""
+    tenant, _support, _finance, ops = _seed_tenant_and_depts(app_role_db)
+
+    upsert_knowledge_document(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=None,
+        scope="company_shared",
+        title="Business Travel Allowance Policy",
+        content="Employees may claim a daily travel allowance of $75 for meals during business trips.",
+        source=DocumentSource.UPLOAD,
+    )
+
+    # Only 1 of 3 query lexemes ('allow') matches; focused-query minimum ratio (2/3) rejects it
+    results = search_knowledge_chunks(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=ops.id,
+        query="What is the Mars relocation allowance?",
+        include_company_shared=True,
+    )
+    assert results == []
+
+    # Whereas asking specifically about "travel allowance?" (2/2 lexemes) matches
+    travel_res = search_knowledge_chunks(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=ops.id,
+        query="What is the travel allowance?",
+        include_company_shared=True,
+    )
+    assert len(travel_res) == 1
+    assert travel_res[0].title == "Business Travel Allowance Policy"
+
+
+def test_fts_hostile_special_characters_and_operators_never_crash(
+    app_role_db: Session,
+) -> None:
+    """Arbitrary user input with tsquery operators, quotes, colons, parentheses, or stop-words never errors."""
+    tenant, support, _finance, _ops = _seed_tenant_and_depts(app_role_db)
+
+    upsert_knowledge_document(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=support.id,
+        scope="department_private",
+        title="Refund Policy",
+        content="Standard refund policy rules for customer orders.",
+        source=DocumentSource.UPLOAD,
+    )
+
+    empty_or_stop_inputs = [
+        "",
+        "   ",
+        "what is the and or to in of for?",
+        "&&& ||| ::: ''' \"\"\" ((())) ! <-> *",
+        "':* & | ! () \"\"",
+        "((not closed & | 'single\"double:colon",
+    ]
+    for raw_q in empty_or_stop_inputs:
+        res = search_knowledge_chunks(
+            app_role_db,
+            tenant_id=tenant.id,
+            department_id=support.id,
+            query=raw_q,
+        )
+        assert res == [], f"Expected 0 results for {raw_q!r}"
+
+    # Hostile operators around valid keywords still match safely without syntax errors
+    matched = search_knowledge_chunks(
+        app_role_db,
+        tenant_id=tenant.id,
+        department_id=support.id,
+        query="\"refund\" & (policy | ' injection '):* ! ((()))",
+    )
+    assert len(matched) == 1
+    assert matched[0].title == "Refund Policy"
