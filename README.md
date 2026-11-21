@@ -40,3 +40,31 @@ Unit/schema tests can run without live Supabase credentials. Database integratio
 ## Supabase Auth API setup
 
 See [`README_AUTH_SETUP.md`](README_AUTH_SETUP.md) for the Supabase Auth environment variables, dashboard configuration, password recovery redirect setup, cookie behavior, and authentication endpoints.
+
+## Department Workflow System (5 Departments, 6 Workflows, 9 Node Types)
+
+- **5 Approved Departments (`backend/app/services/department.py`, migration `b2c3d4e5f6a7`)**: `support` (Customer Support), `finance` (Finance & Accounts), `sales` (Sales & CRM), `legal` (Legal & Compliance), and `operations` (Internal Operations).
+- **6 Approved Workflow Templates (`backend/app/workflows/template_seed.py`, `backend/scripts/seed_templates.py`)**:
+  1. `support_reply` — Support Reply (Gmail + HubSpot Tickets + Slack)
+  2. `finance_supplier_invoice` — Supplier Invoice Processing (Gmail + Zoho Invoice + Slack)
+  3. `sales_lead_management` — Sales Lead Management (Gmail + HubSpot CRM + Slack)
+  4. `legal_contract_review` — Contract Review (Google Drive + Slack)
+  5. `ops_weekly_report` — Weekly Report (Knowledge Hub + Gmail + Slack)
+  6. `ops_policy_qa` — Policy Q&A (Knowledge Hub + Slack, grounded with `require_sources`)
+  - Seed/upsert idempotently via `uv run python scripts/seed_templates.py` (from `backend/`). Unapproved legacy templates are deactivated (`is_active=False`).
+- **9 Approved Node Types (`backend/app/workflows/definition.py`, `backend/app/workflows/dept_executor.py`)**:
+  `Trigger` (`schedule` / `event` / `manual`), `Classify`, `Retrieve` (Knowledge Hub / `aggregate_ops`), `Extract`, `Agent`, `Condition` (safe AST evaluator), `Human Approval`, `Action`, and `Wait`.
+- **Strict Evaluation Gate & Replay (`backend/app/services/department_workflows.py`, `backend/app/api/v1/department_workflows.py`)**:
+  - Each of the 6 templates ships with a built-in 3-case `EvalSet`.
+  - `POST /departments/{id}/workflows/{wf_id}/eval` runs a **structural readiness gate (deterministic, 0 tokens)** — verifying DAG schema validity and department connector readiness without calling an LLM — and records `EvalResult`. Activation (`activate_department_workflow`) is blocked (`409`) unless the latest `EvalResult` for that `workflow_version_id` passed.
+  - `POST /departments/{id}/runs/{run_id}/replay` and `POST /runs/{run_id}/replay` replay a prior run's input on the workflow.
+- **Knowledge Hub Scoping & Connector Sync (`backend/app/services/knowledge_sync.py`, `backend/app/api/v1/knowledge.py`, migration `b2c3d4e5f6a7`)**:
+  - Documents support `scope` (`company_shared` / `department_private`) and `department_id` so department-private data is isolated during `Retrieve` steps.
+  - Manual uploads via `KnowledgeBasePage.tsx` and connector sync via `POST /knowledge/sync/{connection_id}` + Celery task `sync_connector_knowledge_task`.
+- **AI Routing & Token Cost Limits (`backend/app/ai/services/dept_ai_service.py`, `backend/app/ai/routing/dept_router.py`)**:
+  - `AI_PRIMARY_PROVIDER=groq`, `AI_FALLBACK_PROVIDER=gemini` with Redis rate limiting, `<UNTRUSTED_DATA>` prompt-injection guards, and per-tenant daily/monthly token caps (`AI_DAILY_TOKEN_LIMIT`, `AI_MONTHLY_TOKEN_LIMIT`) tracked via `ai_runs`.
+- **Connectors (`backend/app/connectors/`, `backend/app/workflows/action_registry.py`)**:
+  - Approved connectors: `gmail`, `google_drive`, `google_calendar`, `slack`, `hubspot` (CRM + Tickets API: `hubspot.create_ticket`, `hubspot.update_ticket`, `hubspot.create_contact`), and `zoho_invoice` (REST API v3 with rate limiting + `Semaphore(5)` concurrency cap: `zoho_invoice.create_invoice`).
+  - All connections are strictly department-owned and isolated.
+- **Frontend Builder (`frontend/src/pages/DeptWorkflowBuilderPage.tsx`, `frontend/src/pages/KnowledgeBasePage.tsx`)**:
+  - React Flow canvas with the 8 canvas node types + top-level Trigger, live AI node testing, **Run Eval** gate before **Activate**, **Replay** in run history, and scoped Knowledge Hub management.

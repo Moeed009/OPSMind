@@ -9,24 +9,20 @@ from app.core.config import get_settings
 
 ASYMMETRIC_ALGORITHMS = frozenset({"ES256", "RS256", "EdDSA"})
 
-
 class AuthError(Exception):
-    """Token missing, invalid, expired ya unsupported."""
-
+    """Token missing, invalid, expired or signed with an unsupported algorithm."""
 
 @dataclass(frozen=True)
 class AuthUser:
     id: uuid.UUID
     email: str | None
 
-
 @lru_cache
 def _jwks_client(jwks_url: str) -> PyJWKClient:
     return PyJWKClient(jwks_url, cache_jwk_set=True, lifespan=3600, timeout=5)
 
-
 def decode_token(token: str) -> AuthUser:
-   
+    """Verify a Supabase access token (signature, expiry, audience, issuer) and return its user."""
     settings = get_settings()
     base_url = settings.supabase_url.rstrip("/")
     try:

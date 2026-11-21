@@ -5,12 +5,12 @@ from app.api.deps import CurrentUser, UserDb
 from app.db.models import Membership, Tenant, User
 from app.schemas.tenant import MeOut, TenantOut
 
-router = APIRouter(tags=["me"])
+router = APIRouter(tags=["Current_user"])
 
 
+@router.get("/current_user", response_model=MeOut)
 @router.get("/me", response_model=MeOut)
-def read_me(user: CurrentUser, db: UserDb) -> MeOut:
-    
+def read_current_user(user: CurrentUser, db: UserDb) -> MeOut:
     row = db.scalar(select(User).where(User.id == user.id))
     if row is not None and not row.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User is inactive")

@@ -1,12 +1,13 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, LargeBinary, String, Text, UniqueConstraint, Uuid, text
+from sqlalchemy import DateTime, ForeignKey, Index, LargeBinary, String, Text, UniqueConstraint, Uuid, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.db.enums import ConnectionStatus
+from app.db.fk import tenant_fk
 from app.db.mixins import TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 from app.db.types import enum_column
 
@@ -16,8 +17,11 @@ class Connection(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "provider", "external_account_id"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
+        Index("ix_connections_tenant_id_department_id", "tenant_id", "department_id"),
     )
 
+    department_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     provider: Mapped[str] = mapped_column(String(50))
     display_name: Mapped[str] = mapped_column(String(200))
     external_account_id: Mapped[str | None] = mapped_column(String(255))

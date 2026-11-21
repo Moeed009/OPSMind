@@ -1,4 +1,4 @@
-﻿import redis
+import redis
 from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
@@ -9,18 +9,15 @@ from app.db.session import get_engine
 
 router = APIRouter(tags=["health"])
 
-
 class HealthResponse(BaseModel):
     status: str
     app: str
     environment: str
 
-
 class ReadinessResponse(BaseModel):
     status: str
     database: bool
     redis: bool
-
 
 def check_database() -> bool:
     try:
@@ -30,20 +27,17 @@ def check_database() -> bool:
     except SQLAlchemyError:
         return False
 
-
 def check_redis() -> bool:
     try:
-        client = redis.Redis.from_url(get_settings().redis_url, socket_connect_timeout=2)
-        return bool(client.ping())
+        with redis.Redis.from_url(get_settings().redis_url, socket_connect_timeout=2) as client:
+            return bool(client.ping())
     except redis.RedisError:
         return False
-
 
 @router.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     settings = get_settings()
     return HealthResponse(status="ok", app=settings.app_name, environment=settings.environment)
-
 
 @router.get("/health/ready", response_model=ReadinessResponse)
 def ready(response: Response) -> ReadinessResponse:

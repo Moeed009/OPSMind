@@ -12,17 +12,15 @@ from app.core.security import AuthUser
 from app.db.enums import Role
 from app.db.models import AuditLog, Invitation, Membership, Tenant, User
 from app.db.rls import set_rls_context
-from app.schemas.member import InvitationOut
+from app.schemas.member import InvitationInfoOut, InvitationOut
 from app.schemas.tenant import TenantOut
 from app.services.member import can_manage, forbidden
 from app.services.tenant import MAX_TENANTS_PER_USER, ensure_user
 
 INVITE_TTL = timedelta(days=7)
 
-
 def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
-
 
 def to_out(invitation: Invitation) -> InvitationOut:
     pending = invitation.accepted_at is None and invitation.revoked_at is None
@@ -34,7 +32,6 @@ def to_out(invitation: Invitation) -> InvitationOut:
         created_at=invitation.created_at,
         expired=pending and invitation.expires_at <= datetime.now(UTC),
     )
-
 
 def _audit(db: Session, tenant_id: uuid.UUID, actor_id: uuid.UUID, action: str, entity_id, details):
     db.add(
@@ -48,7 +45,6 @@ def _audit(db: Session, tenant_id: uuid.UUID, actor_id: uuid.UUID, action: str, 
         )
     )
 
-
 def create_invitation(
     db: Session,
     *,
@@ -58,7 +54,7 @@ def create_invitation(
     email: str,
     role: Role,
 ) -> tuple[InvitationOut, str]:
-    """Invite banata hai. Asli token sirf yahan se wapas jata hai, DB mein sirf hash."""
+    """Create an invitation. The raw token is returned only from here; the DB stores its hash."""
     if not can_manage(actor_role, role):
         raise forbidden()
 
@@ -70,7 +66,7 @@ def create_invitation(
     if already_member is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "This person is already a member")
 
-    # Expire ho chuki pending invite naye invite ka raasta na roke.
+    
     now = datetime.now(UTC)
     db.execute(
         update(Invitation)
@@ -112,7 +108,6 @@ def create_invitation(
     db.flush()
     return to_out(invitation), token
 
-
 def list_pending(db: Session, tenant_id: uuid.UUID) -> list[InvitationOut]:
     rows = db.scalars(
         select(Invitation)
@@ -124,7 +119,6 @@ def list_pending(db: Session, tenant_id: uuid.UUID) -> list[InvitationOut]:
         .order_by(Invitation.created_at.desc(), Invitation.id)
     )
     return [to_out(row) for row in rows]
-
 
 def revoke_invitation(
     db: Session,
@@ -146,7 +140,7 @@ def revoke_invitation(
     if invitation.accepted_at is not None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Invitation was already accepted")
     if invitation.revoked_at is not None:
-        return  # idempotent
+        return              
 
     invitation.revoked_at = datetime.now(UTC)
     _audit(
@@ -155,9 +149,36 @@ def revoke_invitation(
     )
     db.flush()
 
+def get_invitation_info(db: Session, token: str) -> InvitationInfoOut:
+    found = db.execute(
+        text(
+            "select id, tenant_id, email, role, expires_at, accepted_at, revoked_at "
+            "from app_find_invitation(:h)"
+        ),
+        {"h": hash_token(token)},
+    ).one_or_none()
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation not found or link is invalid")
+
+    now = datetime.now(UTC)
+    is_expired = found.expires_at <= now
+    is_valid = not found.revoked_at and not found.accepted_at and not is_expired
+
+    tenant = db.get(Tenant, found.tenant_id)
+    tenant_name = tenant.name if tenant else "Unknown Company"
+
+    return InvitationInfoOut(
+        id=found.id,
+        email=found.email,
+        role=Role(found.role),
+        tenant_name=tenant_name,
+        expires_at=found.expires_at,
+        expired=is_expired,
+        is_valid=is_valid,
+    )
 
 def accept_invitation(db: Session, user: AuthUser, token: str) -> TenantOut:
-    """Invitee (login ke baad) token deta hai. JWT email invite ke email se match hona chahiye."""
+    """Accept an invitation as the logged-in invitee; the JWT email must match the invited email."""
     found = db.execute(
         text(
             "select id, tenant_id, email, role, expires_at, accepted_at, revoked_at "
@@ -167,9 +188,13 @@ def accept_invitation(db: Session, user: AuthUser, token: str) -> TenantOut:
     ).one_or_none()
     if found is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Invitation not found")
-    if user.email is None or user.email != found.email:
+
+    user_email = (user.email or "").strip().lower()
+    invited_email = (found.email or "").strip().lower()
+    if not user_email or user_email != invited_email:
         raise HTTPException(
-            status.HTTP_403_FORBIDDEN, "This invitation was sent to a different email address"
+            status.HTTP_403_FORBIDDEN,
+            f"This invitation was sent to {found.email}, but you are signed in as {user.email or 'an unknown account'}. Please switch accounts to accept.",
         )
     gone = HTTPException(status.HTTP_410_GONE, "This invitation is no longer valid")
     if found.revoked_at or found.accepted_at or found.expires_at <= datetime.now(UTC):
@@ -179,7 +204,6 @@ def accept_invitation(db: Session, user: AuthUser, token: str) -> TenantOut:
     if not row.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User is inactive")
 
-    # Ab tenant context: token ka maalik hi ye tenant chun sakta hai.
     set_rls_context(db, tenant_id=found.tenant_id)
     invitation = db.scalar(
         select(Invitation).where(Invitation.id == found.id).with_for_update()
@@ -214,11 +238,4 @@ def accept_invitation(db: Session, user: AuthUser, token: str) -> TenantOut:
     db.flush()
 
     tenant = db.get(Tenant, found.tenant_id)
-    return TenantOut(
-        id=tenant.id,
-        name=tenant.name,
-        slug=tenant.slug,
-        region=tenant.region,
-        plan=tenant.plan,
-        role=invitation.role,
-    )
+    return TenantOut.from_tenant(tenant, invitation.role)

@@ -4,13 +4,22 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "alembic>=1.20.1",
+    "celery>=5.7.0",
+    "composio>=0.32.0",
     "email-validator>=2.3.0",
+    "en-core-web-sm",
     "fastapi>=0.162.0",
+    "greenlet>=3.5.6",
     "httpx>=0.28.1",
     "pgvector>=0.5.1",
+    "presidio-analyzer>=2.2.366",
+    "presidio-anonymizer>=2.2.366",
     "psycopg[binary]>=3.3.6",
     "pydantic-settings>=2.16.2",
     "pyjwt[crypto]>=2.15.1",
+    "pypdf>=7.1.0",
+    "python-docx>=1.2.0",
+    "python-multipart>=0.0.34",
     "redis>=8.1.0",
     "sqlalchemy>=2.1.6",
     "uvicorn[standard]>=0.54.0",
@@ -20,6 +29,7 @@ dependencies = [
 dev = [
     "httpx>=0.28.1",
     "pytest>=9.2.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.17.3",
 ]
 [tool.pytest.ini_options]
@@ -27,9 +37,13 @@ pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]
-line-length = 100
+line-length = 120
 target-version = "py312"
 extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.uv.sources]
+en-core-web-sm = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }

@@ -20,7 +20,6 @@ from app.db.mixins import TenantScopedMixin, TimestampMixin, UUIDPrimaryKeyMixin
 
 EMBEDDING_DIMENSIONS = 384
 
-
 class DocChunk(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
     __tablename__ = "doc_chunks"
     __table_args__ = (

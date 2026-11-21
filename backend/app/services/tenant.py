@@ -15,14 +15,12 @@ from app.db.models import AuditLog, Membership, Subscription, Tenant, User
 from app.db.rls import set_rls_context
 from app.schemas.tenant import TenantCreate, TenantOut
 
-MAX_TENANTS_PER_USER = 3
+MAX_TENANTS_PER_USER = 1
 SLUG_ATTEMPTS = 5
-
 
 def slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50].strip("-")
     return slug if len(slug) >= 3 else "company"
-
 
 def _auto_slugs(name: str) -> Iterator[str]:
     base = slugify(name)
@@ -30,14 +28,12 @@ def _auto_slugs(name: str) -> Iterator[str]:
     for _ in range(SLUG_ATTEMPTS - 1):
         yield f"{base}-{secrets.token_hex(2)}"
 
-
 def _is_slug_conflict(exc: IntegrityError) -> bool:
     diag = getattr(exc.orig, "diag", None)
     return getattr(diag, "constraint_name", None) == "uq_tenants_slug"
 
-
 def ensure_user(db: Session, user: AuthUser) -> User:
-    
+    """Return the locked local profile row for `user`, creating it on first use."""
     if user.email:
         db.execute(
             pg_insert(User).values(id=user.id, email=user.email).on_conflict_do_nothing()
@@ -50,7 +46,6 @@ def ensure_user(db: Session, user: AuthUser) -> User:
             status.HTTP_409_CONFLICT, "This email is already registered to another account"
         )
     return row
-
 
 def _insert_tenant(db: Session, tenant_id: uuid.UUID, payload: TenantCreate) -> Tenant:
     slugs = [payload.slug] if payload.slug else _auto_slugs(payload.name)
@@ -72,9 +67,8 @@ def _insert_tenant(db: Session, tenant_id: uuid.UUID, payload: TenantCreate) -> 
                 raise
     raise HTTPException(status.HTTP_409_CONFLICT, "This slug is already taken")
 
-
 def create_tenant(db: Session, user: AuthUser, payload: TenantCreate) -> TenantOut:
-    
+    """Create a tenant owned by `user`, enforcing the per-user company limit."""
     row = ensure_user(db, user)
     if not row.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "User is inactive")
@@ -106,11 +100,4 @@ def create_tenant(db: Session, user: AuthUser, payload: TenantCreate) -> TenantO
     )
     db.flush()
 
-    return TenantOut(
-        id=tenant_id,
-        name=tenant.name,
-        slug=tenant.slug,
-        region=payload.region,
-        plan=Plan.FREE,
-        role=Role.OWNER,
-    )
+    return TenantOut.from_tenant(tenant, Role.OWNER)

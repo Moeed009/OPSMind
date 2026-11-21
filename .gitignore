@@ -3,5 +3,12 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .env
+.env.local
+backend/.env
+backend/.env.local
+*.pem
+*.crt
+frontend/.certs/
+.auth_rsa_key.pem
 node_modules/
 dist/

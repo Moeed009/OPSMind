@@ -1,7 +1,7 @@
 import app.db.models  # noqa: F401
 from app.db.base import Base
 
-GLOBAL_TABLES = {"tenants", "users"}
+GLOBAL_TABLES = {"tenants", "users", "workflow_templates"}
 
 
 def test_every_tenant_scoped_table_has_tenant_id():

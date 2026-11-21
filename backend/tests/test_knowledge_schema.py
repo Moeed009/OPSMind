@@ -37,5 +37,6 @@ def test_all_section_8_tables_have_models():
         "workflow_versions", "runs", "run_steps", "action_logs", "review_tasks",
         "documents", "doc_chunks", "eval_sets", "eval_results", "guardrail_events",
         "usage_records", "subscriptions", "api_keys", "audit_logs", "invitations",
+        "email_settings", "departments", "department_members", "workflow_templates", "workflow_approvals", "ai_runs", "oauth_states",
     }
     assert set(Base.metadata.tables) == expected

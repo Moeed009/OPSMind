@@ -105,7 +105,7 @@ def audit_count(engine, tenant_id) -> int:
 
 @pytest.mark.parametrize("role", ROLES)
 def test_every_role_can_read_the_tenant(seed, role):
-    r = client.get("/api/v1/tenant", headers=hdr(seed["users"][role], seed["tenant"]))
+    r = client.get("/tenant", headers=hdr(seed["users"][role], seed["tenant"]))
     assert r.status_code == 200
     assert r.json()["role"] == role
     assert r.json()["id"] == str(seed["tenant"])
@@ -116,7 +116,7 @@ def test_non_owner_cannot_rename_tenant(seed, owner_engine, role):
     before = db_name(owner_engine, seed["tenant"])
     audits = audit_count(owner_engine, seed["tenant"])
     r = client.patch(
-        "/api/v1/tenant",
+        "/tenant",
         json={"name": f"Hacked by {role}"},
         headers=hdr(seed["users"][role], seed["tenant"]),
     )
@@ -131,10 +131,10 @@ def test_owner_can_rename_and_it_is_audited(seed, owner_engine):
     audits = audit_count(owner_engine, seed["tenant"])
     new = f"Renamed {seed['tag']}"
 
-    r = client.patch("/api/v1/tenant", json={"name": new}, headers=headers)
+    r = client.patch("/tenant", json={"name": new}, headers=headers)
     assert r.status_code == 200
     assert r.json()["name"] == new
-    assert client.get("/api/v1/tenant", headers=headers).json()["name"] == new
+    assert client.get("/tenant", headers=headers).json()["name"] == new
     assert db_name(owner_engine, seed["tenant"]) == new
     assert audit_count(owner_engine, seed["tenant"]) == audits + 1
 
@@ -153,7 +153,7 @@ def test_renaming_to_same_name_writes_no_audit_entry(seed, owner_engine):
     headers = hdr(seed["users"]["owner"], seed["tenant"])
     current = db_name(owner_engine, seed["tenant"])
     audits = audit_count(owner_engine, seed["tenant"])
-    r = client.patch("/api/v1/tenant", json={"name": current}, headers=headers)
+    r = client.patch("/tenant", json={"name": current}, headers=headers)
     assert r.status_code == 200
     assert audit_count(owner_engine, seed["tenant"]) == audits
 
@@ -161,8 +161,8 @@ def test_renaming_to_same_name_writes_no_audit_entry(seed, owner_engine):
 def test_owner_of_another_company_cannot_touch_this_one(seed, owner_engine):
     before = db_name(owner_engine, seed["tenant"])
     headers = hdr(seed["other_owner"], seed["tenant"])
-    assert client.get("/api/v1/tenant", headers=headers).status_code == 403
-    r = client.patch("/api/v1/tenant", json={"name": "Stolen"}, headers=headers)
+    assert client.get("/tenant", headers=headers).status_code == 403
+    r = client.patch("/tenant", json={"name": "Stolen"}, headers=headers)
     assert r.status_code == 403
     assert db_name(owner_engine, seed["tenant"]) == before
 
@@ -170,4 +170,4 @@ def test_owner_of_another_company_cannot_touch_this_one(seed, owner_engine):
 @pytest.mark.parametrize("body", [{"name": "A"}, {"name": "Valid Name", "region": "us"}, {}])
 def test_invalid_rename_payload_is_422(seed, body):
     headers = hdr(seed["users"]["owner"], seed["tenant"])
-    assert client.patch("/api/v1/tenant", json=body, headers=headers).status_code == 422
+    assert client.patch("/tenant", json=body, headers=headers).status_code == 422

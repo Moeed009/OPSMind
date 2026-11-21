@@ -5,12 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.enums import Role
-from app.db.models import AuditLog, Membership, User
-from app.schemas.member import MemberOut
+from app.db.models import AuditLog, Department, DepartmentMember, Membership, User
+from app.schemas.member import MemberDepartmentSummary, MemberOut
 
 ADMIN_MANAGEABLE = frozenset({Role.BUILDER, Role.REVIEWER, Role.VIEWER})
 LAST_OWNER_MESSAGE = "A company must keep at least one Owner"
-
 
 def can_manage(actor_role: Role, target_role: Role, new_role: Role | None = None) -> bool:
     if actor_role == Role.OWNER:
@@ -21,13 +20,11 @@ def can_manage(actor_role: Role, target_role: Role, new_role: Role | None = None
         return new_role is None or new_role in ADMIN_MANAGEABLE
     return False
 
-
 def forbidden() -> HTTPException:
     return HTTPException(status.HTTP_403_FORBIDDEN, "Your role does not allow this action")
 
-
 def _lock_owner_ids(db: Session, tenant_id: uuid.UUID) -> list[uuid.UUID]:
-    """Owners ki rows lock: do saath-saath requests aakhri Owner nahi hata sakti."""
+    """Lock the Owner rows so two concurrent requests cannot both remove the last Owner."""
     return list(
         db.scalars(
             select(Membership.user_id)
@@ -36,7 +33,6 @@ def _lock_owner_ids(db: Session, tenant_id: uuid.UUID) -> list[uuid.UUID]:
             .with_for_update()
         )
     )
-
 
 def _get_membership(db: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Membership:
     membership = db.scalar(
@@ -47,7 +43,6 @@ def _get_membership(db: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> Me
     if membership is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Member not found")
     return membership
-
 
 def _member_query(tenant_id: uuid.UUID):
     return (
@@ -62,16 +57,70 @@ def _member_query(tenant_id: uuid.UUID):
         .where(Membership.tenant_id == tenant_id)
     )
 
+def _attach_departments(db: Session, tenant_id: uuid.UUID, members: list[MemberOut]) -> list[MemberOut]:
+    if not members:
+        return members
+    dept_rows = db.execute(
+        select(
+            DepartmentMember.user_id,
+            DepartmentMember.role.label("dept_role"),
+            Department.id,
+            Department.name,
+            Department.code,
+            Department.status,
+        )
+        .join(
+            Department,
+            (Department.id == DepartmentMember.department_id)
+            & (Department.tenant_id == DepartmentMember.tenant_id),
+        )
+        .where(DepartmentMember.tenant_id == tenant_id)
+        .order_by(Department.name.asc())
+    ).all()
+
+    tenant_role_by_user = {m.user_id: m.role for m in members}
+    by_user: dict[uuid.UUID, list[MemberDepartmentSummary]] = {}
+    for row in dept_rows:
+        t_role = tenant_role_by_user.get(row.user_id, Role.VIEWER)
+        eff_role = (
+            t_role
+            if t_role in (Role.OWNER, Role.ADMIN)
+            else (Role(row.dept_role.value) if row.dept_role is not None else t_role)
+        )
+        by_user.setdefault(row.user_id, []).append(
+            MemberDepartmentSummary(
+                id=row.id,
+                name=row.name,
+                code=row.code,
+                status=row.status.value if hasattr(row.status, "value") else str(row.status),
+                role=row.dept_role,
+                effective_role=eff_role,
+            )
+        )
+
+    enriched: list[MemberOut] = []
+    for m in members:
+        depts = by_user.get(m.user_id, [])
+        enriched.append(
+            m.model_copy(
+                update={
+                    "departments": depts,
+                    "assignment_status": "assigned" if depts else "unassigned",
+                }
+            )
+        )
+    return enriched
+
 
 def list_members(db: Session, tenant_id: uuid.UUID) -> list[MemberOut]:
     rows = db.execute(_member_query(tenant_id).order_by(Membership.created_at, User.email))
-    return [MemberOut(**row._mapping) for row in rows]
+    base = [MemberOut(**row._mapping) for row in rows]
+    return _attach_departments(db, tenant_id, base)
 
 
 def _load_member(db: Session, tenant_id: uuid.UUID, user_id: uuid.UUID) -> MemberOut:
     row = db.execute(_member_query(tenant_id).where(Membership.user_id == user_id)).one()
-    return MemberOut(**row._mapping)
-
+    return _attach_departments(db, tenant_id, [MemberOut(**row._mapping)])[0]
 
 def change_role(
     db: Session,
@@ -106,7 +155,6 @@ def change_role(
     db.flush()
     return _load_member(db, tenant_id, target_id)
 
-
 def remove_member(
     db: Session,
     *,
@@ -124,6 +172,10 @@ def remove_member(
         raise HTTPException(status.HTTP_409_CONFLICT, LAST_OWNER_MESSAGE)
 
     role = membership.role
+    db.query(DepartmentMember).filter(
+        DepartmentMember.tenant_id == tenant_id,
+        DepartmentMember.user_id == target_id,
+    ).delete(synchronize_session=False)
     db.delete(membership)
     db.add(
         AuditLog(

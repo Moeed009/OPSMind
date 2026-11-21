@@ -30,22 +30,36 @@ class Run(UUIDPrimaryKeyMixin, TimestampMixin, TenantScopedMixin, Base):
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "idempotency_key"),
         tenant_fk("workflow_version_id", "workflow_versions"),
+        tenant_fk("workflow_id", "workflows"),
         tenant_fk("event_id", "events"),
+        tenant_fk("department_id", "departments", ondelete="SET NULL"),
         CheckConstraint("cost_usd >= 0", name="cost_non_negative"),
         Index("ix_runs_tenant_id_workflow_version_id", "tenant_id", "workflow_version_id"),
+        Index("ix_runs_tenant_id_workflow_id", "tenant_id", "workflow_id"),
         Index("ix_runs_tenant_id_created_at", "tenant_id", "created_at"),
+        Index("ix_runs_tenant_id_department_id", "tenant_id", "department_id"),
+        Index(
+            "uq_runs_workflow_scheduled_for",
+            "workflow_id",
+            "scheduled_for",
+            unique=True,
+            postgresql_where=text("scheduled_for IS NOT NULL"),
+        ),
         Index(
             "ix_runs_active",
             "tenant_id",
             "status",
             postgresql_where=text(
-                "status IN ('queued', 'running', 'waiting_timer', 'waiting_human', 'retrying')"
+                "status IN ('queued', 'running', 'waiting_timer', 'waiting_human', 'waiting_approval', 'needs_review', 'retrying')"
             ),
         ),
     )
 
     workflow_version_id: Mapped[uuid.UUID] = mapped_column(Uuid)
+    workflow_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    department_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     event_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     trigger_source: Mapped[TriggerSource] = mapped_column(
         enum_column(TriggerSource, "trigger_source")
     )

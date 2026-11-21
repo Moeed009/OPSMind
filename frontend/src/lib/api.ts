@@ -1,76 +1,82 @@
-export const API_BASE = '/api/v1'
+import { getTenantId } from './tenant';
+
+const BASE = '';
 
 export class ApiError extends Error {
-  readonly status: number
-  readonly body: unknown
+  readonly status: number;
 
-  constructor(status: number, message: string, body: unknown = null) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-    this.body = body
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
   }
 }
 
-export interface ApiOptions extends Omit<RequestInit, 'body' | 'credentials'> {
-  json?: unknown
-  tenantId?: string
+type Json = Record<string, unknown> | unknown[];
+
+export interface ApiOptions {
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
+  body?: Json;
+  tenantId?: string;
 }
 
-function messageFromBody(body: unknown, fallback: string): string {
-  if (typeof body === 'object' && body !== null && 'detail' in body) {
-    const detail = (body as { detail: unknown }).detail
-    if (typeof detail === 'string') return detail
-    if (Array.isArray(detail)) {
-      const messages = detail
-        .map((item) =>
-          typeof item === 'object' && item !== null && 'msg' in item
-            ? String((item as { msg: unknown }).msg)
-            : null,
-        )
-        .filter((message): message is string => message !== null)
-      if (messages.length > 0) return messages.join('; ')
+function send(path: string, { method = 'GET', body, tenantId }: ApiOptions): Promise<Response> {
+  const headers = new Headers({ Accept: 'application/json' });
+  if (body !== undefined) headers.set('Content-Type', 'application/json');
+  const tenant = tenantId ?? getTenantId();
+  if (tenant) headers.set('X-Tenant-ID', tenant);
+  return fetch(`${BASE}${path}`, {
+    method,
+    headers,
+    credentials: 'include',
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+async function readError(res: Response): Promise<string> {
+  try {
+    const data: unknown = await res.json();
+    if (data && typeof data === 'object' && 'detail' in data) {
+      const detail = (data as { detail: unknown }).detail;
+      if (typeof detail === 'string') return detail;
+      if (Array.isArray(detail) && detail.length > 0) {
+        const first = detail[0] as { loc?: unknown[]; msg?: string };
+        const field = Array.isArray(first.loc)
+          ? first.loc.filter((part) => part !== 'body').join('.')
+          : '';
+        const msg = first.msg ?? 'invalid value';
+        return field ? `${field}: ${msg}` : msg;
+      }
     }
+  } catch {
   }
-  return fallback
+  return res.status >= 500 ? 'Server error. Please try again.' : `Request failed (${res.status})`;
 }
 
-async function readBody(response: Response): Promise<unknown> {
-  const text = await response.text()
-  if (!text) return null
-  try {
-    return JSON.parse(text)
-  } catch {
-    return text
-  }
+let refreshInFlight: Promise<boolean> | null = null;
+
+function refreshSession(): Promise<boolean> {
+  refreshInFlight ??= fetch(`${BASE}/auth/refresh`, { method: 'POST', credentials: 'include' })
+    .then((res) => res.ok)
+    .catch(() => false)
+    .finally(() => {
+      refreshInFlight = null;
+    });
+  return refreshInFlight;
 }
 
-export async function apiFetch<T>(path: string, options: ApiOptions = {}): Promise<T> {
-  const { json, tenantId, headers: extraHeaders, ...init } = options
-  const headers = new Headers(extraHeaders)
-  headers.set('Accept', 'application/json')
-  if (json !== undefined) headers.set('Content-Type', 'application/json')
-  if (tenantId) headers.set('X-Tenant-ID', tenantId)
-
-  let response: Response
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers,
-      credentials: 'include',
-      body: json === undefined ? undefined : JSON.stringify(json),
-    })
-  } catch {
-    throw new ApiError(0, 'Cannot reach the server. Check your connection and try again.')
+export async function api<T = unknown>(path: string, options: ApiOptions = {}): Promise<T> {
+  let res = await send(path, options);
+  if (res.status === 401 && !path.startsWith('/auth/') && (await refreshSession())) {
+    res = await send(path, options);
   }
+  if (!res.ok) throw new ApiError(res.status, await readError(res));
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
 
-  const body = await readBody(response)
-  if (!response.ok) {
-    throw new ApiError(
-      response.status,
-      messageFromBody(body, `Request failed (${response.status})`),
-      body,
-    )
-  }
-  return body as T
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof ApiError) return error.message;
+  if (error instanceof TypeError) return 'Cannot reach the server. Check your connection.';
+  return 'Something went wrong. Please try again.';
 }

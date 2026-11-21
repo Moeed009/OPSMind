@@ -1,85 +1,94 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, api, getErrorMessage } from './api';
 
-import { ApiError, apiFetch } from './api'
-
-function respond(status: number, body: unknown) {
-  return new Response(body === null ? null : JSON.stringify(body), { status })
+function json(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
-describe('apiFetch', () => {
-  it('returns parsed JSON and always sends cookies', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(respond(200, { status: 'ok' }))
-    vi.stubGlobal('fetch', fetchMock)
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
-    const data = await apiFetch<{ status: string }>('/health')
+describe('api', () => {
+  it('parses json and sends cookies', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({ ok: true }));
+    vi.stubGlobal('fetch', fetchMock);
 
-    expect(data).toEqual({ status: 'ok' })
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('/api/v1/health')
-    expect(init.credentials).toBe('include')
-  })
+    await expect(api('/current_user')).resolves.toEqual({ ok: true });
 
-  it('sends a JSON body with a content type', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(respond(201, { id: '1' }))
-    vi.stubGlobal('fetch', fetchMock)
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/current_user');
+    expect(init.credentials).toBe('include');
+  });
 
-    await apiFetch('/tenants', { method: 'POST', json: { name: 'Acme' } })
+  it('sends X-Tenant-ID when a tenant is given', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(json({}));
+    vi.stubGlobal('fetch', fetchMock);
 
-    const init = fetchMock.mock.calls[0][1]
-    expect(init.body).toBe('{"name":"Acme"}')
-    expect(new Headers(init.headers).get('Content-Type')).toBe('application/json')
-  })
+    await api('/tenant', { tenantId: 'tenant-1' });
 
-  it('adds the tenant header only when a tenant is given', async () => {
-    const fetchMock = vi.fn().mockImplementation(async () => respond(200, {}))
-    vi.stubGlobal('fetch', fetchMock)
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((init.headers as Headers).get('X-Tenant-ID')).toBe('tenant-1');
+  });
 
-    await apiFetch('/members', { tenantId: 'tenant-1' })
-    await apiFetch('/me')
+  it('refreshes once on 401 and retries the request', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ detail: 'Not authenticated' }, 401))
+      .mockResolvedValueOnce(json({ authenticated: true }))
+      .mockResolvedValueOnce(json({ id: '1' }));
+    vi.stubGlobal('fetch', fetchMock);
 
-    expect(new Headers(fetchMock.mock.calls[0][1].headers).get('X-Tenant-ID')).toBe('tenant-1')
-    expect(new Headers(fetchMock.mock.calls[1][1].headers).has('X-Tenant-ID')).toBe(false)
-  })
+    await expect(api('/current_user')).resolves.toEqual({ id: '1' });
 
-  it('turns a string detail into an ApiError', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(respond(403, { detail: 'No access to this tenant' })))
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((fetchMock.mock.calls[1] as [string])[0]).toBe('/auth/refresh');
+  });
 
-    await expect(apiFetch('/members')).rejects.toMatchObject({
-      name: 'ApiError',
-      status: 403,
-      message: 'No access to this tenant',
-    })
-  })
+  it('gives up with the 401 when refresh fails', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(json({ detail: 'Not authenticated' }, 401))
+      .mockResolvedValueOnce(json({ detail: 'Refresh session not found' }, 401));
+    vi.stubGlobal('fetch', fetchMock);
 
-  it('joins validation messages from a 422 response', async () => {
-    const detail = [{ msg: 'Field required' }, { msg: 'Invalid region' }]
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(respond(422, { detail })))
+    await expect(api('/current_user')).rejects.toMatchObject({ status: 401 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 
-    await expect(apiFetch('/tenants', { method: 'POST', json: {} })).rejects.toMatchObject({
-      status: 422,
-      message: 'Field required; Invalid region',
-    })
-  })
+  it('never refreshes for /auth/ endpoints', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(json({ detail: 'Invalid email or password' }, 401));
+    vi.stubGlobal('fetch', fetchMock);
 
-  it('falls back to a generic message and keeps the body', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(respond(503, { status: 'degraded' })))
+    await expect(
+      api('/auth/login', { method: 'POST', body: { email: 'a@b.c', password: 'x' } }),
+    ).rejects.toThrow('Invalid email or password');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
 
-    const error = await apiFetch('/health/ready').catch((e: unknown) => e)
+  it('turns FastAPI validation errors into a readable message', async () => {
+    const detail = [{ loc: ['body', 'password'], msg: 'String should have at least 12 characters' }];
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(json({ detail }, 422)));
 
-    expect(error).toBeInstanceOf(ApiError)
-    expect((error as ApiError).message).toBe('Request failed (503)')
-    expect((error as ApiError).body).toEqual({ status: 'degraded' })
-  })
+    await expect(api('/auth/signup', { method: 'POST', body: {} })).rejects.toThrow(
+      'password: String should have at least 12 characters',
+    );
+  });
 
-  it('reports a network failure as status 0', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')))
+  it('returns undefined for 204', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
+    await expect(api('/auth/logout', { method: 'POST' })).resolves.toBeUndefined();
+  });
+});
 
-    await expect(apiFetch('/health')).rejects.toMatchObject({ status: 0 })
-  })
-
-  it('handles an empty response body', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(null, { status: 204 })))
-
-    await expect(apiFetch('/auth/logout', { method: 'POST' })).resolves.toBeNull()
-  })
-})
+describe('getErrorMessage', () => {
+  it('uses the API message, and a friendly one for network errors', () => {
+    expect(getErrorMessage(new ApiError(409, 'Company limit reached'))).toBe('Company limit reached');
+    expect(getErrorMessage(new TypeError('Failed to fetch'))).toMatch(/Cannot reach the server/);
+  });
+});

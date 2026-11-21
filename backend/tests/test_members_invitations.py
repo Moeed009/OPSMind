@@ -157,27 +157,27 @@ def new_email() -> str:
 
 def patch_role(actor, tenant, target, role):
     return client.patch(
-        f"/api/v1/members/{target}", json={"role": role}, headers=h(actor, tenant)
+        f"/members/{target}", json={"role": role}, headers=h(actor, tenant)
     )
 
 
 def remove(actor, tenant, target):
-    return client.delete(f"/api/v1/members/{target}", headers=h(actor, tenant))
+    return client.delete(f"/members/{target}", headers=h(actor, tenant))
 
 
 def invite(actor, tenant, email, role="builder"):
     return client.post(
-        "/api/v1/invitations", json={"email": email, "role": role}, headers=h(actor, tenant)
+        "/invitations", json={"email": email, "role": role}, headers=h(actor, tenant)
     )
 
 
 def revoke(actor, tenant, invitation_id):
-    return client.delete(f"/api/v1/invitations/{invitation_id}", headers=h(actor, tenant))
+    return client.delete(f"/invitations/{invitation_id}", headers=h(actor, tenant))
 
 
 def accept(uid, email, token):
     return client.post(
-        "/api/v1/invitations/accept", json={"token": token}, headers=h(uid, email=email)
+        "/invitations/accept", json={"token": token}, headers=h(uid, email=email)
     )
 
 
@@ -186,7 +186,7 @@ def accept(uid, email, token):
 
 @pytest.mark.parametrize("role", ROLES)
 def test_every_role_can_list_members(shared, role):
-    r = client.get("/api/v1/members", headers=h(shared["users"][role], shared["tenant"]))
+    r = client.get("/members", headers=h(shared["users"][role], shared["tenant"]))
     assert r.status_code == 200
     got = {m["user_id"]: m["role"] for m in r.json()}
     assert got == {str(uid): name for name, uid in shared["users"].items()}
@@ -268,7 +268,7 @@ def test_removed_member_loses_access(world):
     assert remove(owner, tenant, builder).status_code == 204
     assert world.role_of(tenant, builder) is None
     assert world.audit(tenant, "member.removed") == 1
-    assert client.get("/api/v1/tenant", headers=h(builder, tenant)).status_code == 403
+    assert client.get("/tenant", headers=h(builder, tenant)).status_code == 403
 
 
 def test_member_can_leave_company(world):
@@ -297,7 +297,7 @@ def test_owner_of_other_company_cannot_manage_members(world, shared):
 @pytest.mark.parametrize("body", [{"role": "god"}, {"role": "viewer", "extra": 1}, {}])
 def test_invalid_role_payload_is_422(shared, body):
     r = client.patch(
-        f"/api/v1/members/{shared['users']['viewer']}",
+        f"/members/{shared['users']['viewer']}",
         json=body,
         headers=h(shared["users"]["owner"], shared["tenant"]),
     )
@@ -388,13 +388,13 @@ def test_pending_list_hides_secrets_and_needs_permission(world):
     tenant, owner, viewer = c["tenant"], c["users"]["owner"], c["users"]["viewer"]
     email = new_email()
     invite(owner, tenant, email)
-    r = client.get("/api/v1/invitations", headers=h(owner, tenant))
+    r = client.get("/invitations", headers=h(owner, tenant))
     assert r.status_code == 200
     items = r.json()
     assert [i["email"] for i in items] == [email]
     assert not {"token", "token_hash"} & set(items[0])
     assert items[0]["expired"] is False
-    assert client.get("/api/v1/invitations", headers=h(viewer, tenant)).status_code == 403
+    assert client.get("/invitations", headers=h(viewer, tenant)).status_code == 403
 
 
 def test_revoke_rules(world):
@@ -405,7 +405,7 @@ def test_revoke_rules(world):
     assert revoke(owner, tenant, inv["id"]).status_code == 204
     assert revoke(owner, tenant, inv["id"]).status_code == 204  # idempotent
     assert revoke(owner, tenant, uuid.uuid4()).status_code == 404
-    assert client.get("/api/v1/invitations", headers=h(owner, tenant)).json() == []
+    assert client.get("/invitations", headers=h(owner, tenant)).json() == []
 
 
 def test_accept_invitation_happy_path(world):
@@ -427,8 +427,8 @@ def test_accept_invitation_happy_path(world):
     assert row.accepted_by == invitee
     assert world.audit(tenant, "invitation.accepted") == 1
 
-    assert client.get("/api/v1/tenant", headers=h(invitee, tenant)).status_code == 200
-    me = client.get("/api/v1/me", headers=h(invitee, email=email)).json()
+    assert client.get("/tenant", headers=h(invitee, tenant)).status_code == 200
+    me = client.get("/current_user", headers=h(invitee, email=email)).json()
     assert [t["id"] for t in me["tenants"]] == [str(tenant)]
     assert accept(invitee, email, token).status_code == 410  # token dobara nahi chalta
 
@@ -497,7 +497,7 @@ def test_accept_when_already_member_is_409(world):
 
 
 def test_accept_requires_authentication(world):
-    r = client.post("/api/v1/invitations/accept", json={"token": "x" * 40})
+    r = client.post("/invitations/accept", json={"token": "x" * 40})
     assert r.status_code == 401
 
 
@@ -505,7 +505,7 @@ def test_invitations_are_isolated_between_companies(world):
     a = world.company(("owner",))
     b = world.company(("owner",))
     invite(a["users"]["owner"], a["tenant"], new_email())
-    r = client.get("/api/v1/invitations", headers=h(b["users"]["owner"], b["tenant"]))
+    r = client.get("/invitations", headers=h(b["users"]["owner"], b["tenant"]))
     assert r.status_code == 200
     assert r.json() == []
 
