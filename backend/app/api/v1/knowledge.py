@@ -18,6 +18,7 @@ from app.db.models.audit_log import AuditLog
 from app.db.models.connection import Connection
 from app.db.models.doc_chunk import DocChunk
 from app.db.models.document import Document
+from app.services.embeddings import embed_document_chunks
 from app.services.retrieval import chunk_text
 
 _chunk_text = chunk_text
@@ -163,7 +164,9 @@ def create_knowledge_document(
     tc.db.flush()
 
     chunks = chunk_text(clean_content)
+    vectors, emb_model = embed_document_chunks(chunks, title=clean_title)
     for idx, chunk_str in enumerate(chunks):
+        vec = vectors[idx] if idx < len(vectors) else None
         tc.db.add(
             DocChunk(
                 tenant_id=tc.tenant_id,
@@ -172,6 +175,8 @@ def create_knowledge_document(
                 content=chunk_str,
                 token_count=max(1, len(chunk_str.split())),
                 metadata_={"title": clean_title, "scope": payload.scope},
+                embedding=vec,
+                embedding_model=emb_model if vec is not None else None,
             )
         )
 
